@@ -277,16 +277,18 @@ After EDHOC succeeds, both endpoints independently perform the same derivation:
 flowchart LR
     edhoc[Authenticated EDHOC result] --> exporter[EDHOC exporter]
     identities[Both credential identities<br/>and rsmp-secure-v1 profile] --> exporter
-    exporter --> hkdf[HKDF-SHA-256 key derivation]
-    hkdf --> session[Session ID]
-    hkdf --> i2r[Initiator-to-responder<br/>key and nonce prefix]
-    hkdf --> r2i[Responder-to-initiator<br/>key and nonce prefix]
+    exporter -->|HKDF-SHA-256| traffic[Traffic secret for this epoch]
+    traffic -->|HKDF| session[Session ID<br/>initial exchange only]
+    traffic -->|HKDF per label| i2r[Initiator-to-responder<br/>key and nonce prefix]
+    traffic -->|HKDF per label| r2i[Responder-to-initiator<br/>key and nonce prefix]
 ```
 
 Including both authenticated identities and the exact profile name in the
 derivation binds the keys to this Secure RSMP context. Separate keys and nonce
 prefixes for each direction prevent traffic in one direction from sharing the
-same cryptographic state as traffic in the other.
+same cryptographic state as traffic in the other. At rekey, a fresh EDHOC
+exporter result supplies the next epoch's traffic secret. The endpoints replace
+the directional keys and nonce prefixes and keep the original session ID.
 
 Because the session keys depend on fresh ephemeral X25519 material, recording a
 connection and stealing a long-term Ed25519 key later is not enough to decrypt

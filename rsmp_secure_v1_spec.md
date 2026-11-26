@@ -256,7 +256,7 @@ rsmp-context = {
 The deterministic-CBOR bytes are passed to RFC 9528:
 
 ```text
-EDHOC_Exporter(
+exporter_result = EDHOC_Exporter(
   label   = 32768,
   context = deterministic_cbor(rsmp-context),
   length  = 32
@@ -265,7 +265,7 @@ EDHOC_Exporter(
 
 Label 32768 is a private-use label. OSCORE exporter labels 0 and 1 **MUST NOT** be used.
 
-The 32-byte exporter result is expanded using full HKDF-SHA-256, with an empty salt. The exact deterministic-CBOR HKDF `info` values are:
+Both HKDF stages use the following `info` structures. The `rsmp_context` field is a CBOR byte string containing the same context bytes supplied to the exporter.
 
 ```cddl
 traffic-secret-info = {
@@ -281,18 +281,35 @@ labeled-info = {
 }
 ```
 
-The derived values are:
+Endpoints **MUST** apply full RFC 5869 HKDF-SHA-256 at each stage. In the equations below, `h''` is an empty byte string, lengths are in bytes, and `labeled-info(label)` is the map above with the indicated text string as its `label` value.
 
-| Value | Length |
-| --- | ---: |
-| traffic secret | 32 bytes |
-| session id | 16 bytes |
-| initiator-to-responder key | 32 bytes |
-| responder-to-initiator key | 32 bytes |
-| initiator-to-responder nonce prefix | 8 bytes |
-| responder-to-initiator nonce prefix | 8 bytes |
+```text
+HKDF(ikm, info, length) = HKDF-Expand(HKDF-Extract(h'', ikm), info, length)
 
-The session id is created by the initial exchange and remains constant across rekeys on that TCP connection. Every rekey uses a fresh EDHOC exporter result and derives fresh traffic secrets, directional keys, and nonce prefixes.
+traffic_secret = HKDF(exporter_result, deterministic_cbor(traffic-secret-info), 32)
+derive(label, length) = HKDF(traffic_secret, deterministic_cbor(labeled-info(label)), length)
+
+session_id       = derive("session id", 16)    # initial exchange only
+i2r_key          = derive("i2r key", 32)
+r2i_key          = derive("r2i key", 32)
+i2r_nonce_prefix = derive("i2r nonce", 8)
+r2i_nonce_prefix = derive("r2i nonce", 8)
+```
+
+`i2r` denotes the EDHOC initiator-to-responder direction and `r2i` the reverse. On every rekey, endpoints **MUST** derive a new traffic secret from the fresh EDHOC exporter result, derive both keys and both nonce prefixes from that secret, and retain the initial session ID.
+
+### 7.1 Key schedule test vector
+
+For the initial exchange, use credential subjects `RN+SI0001` (initiator) and `supervisor` (responder) and the fixed 32-byte exporter result `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`. The expected outputs are hexadecimal.
+
+| Output | Expected bytes |
+| --- | --- |
+| `traffic_secret` | `fba533cce9ad914357386290334a2f577a9848b91d2545c44c7b46f5fa06ba97` |
+| `session_id` | `a2053e954f583bd8bd340a2e67629ff5` |
+| `i2r_key` | `438e9532ddc32f0ed178b4630dbf2997a3acaa57be909117f845e11b3551ff4d` |
+| `r2i_key` | `641bb113a1fd043d7aa266d25a75f7dede88221cc5e5b90df119a2ed5d0bca37` |
+| `i2r_nonce_prefix` | `8bb798819d9ec4a8` |
+| `r2i_nonce_prefix` | `9df78ed6937d1eab` |
 
 ## 8. Protected RSMP data
 
@@ -431,7 +448,7 @@ A conforming implementation **MUST** test at least:
 - exact deterministic-CBOR encoding and rejection of non-deterministic, duplicate, missing, and unknown fields;
 - exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
 - fixed EDHOC method 0 and suite 4, four-message initial completion, EAD rejection, fresh connection identifiers, and generic error behavior;
-- exporter context identity ordering and the complete HKDF derivation;
+- exporter context identity ordering and all six outputs of the Section 7 key schedule test vector;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
 - continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
 - one protected `Version` request and one response, each acknowledged by `oMId`, for both site-opened and supervisor-opened TCP connections and for follower/leader startup;
