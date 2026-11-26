@@ -1,4 +1,4 @@
-# Secure RSMP v1 explained
+# Secure RSMP v1 explained - draft
 
 This is a plain-language companion to the
 [Secure RSMP v1 proposal](./RSMP%20Secure%20v1%20-%20CBOR%20COSE%20proposal.md).
