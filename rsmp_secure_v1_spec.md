@@ -172,9 +172,13 @@ Authentication proves possession of a pinned credential. Authorization separatel
 
 Local policy **MUST** map each trusted credential subject to exactly one expected RSMP identity and role, and **MAY** restrict the permitted RSMP Core versions. Policy is deny-by-default. Identity comparisons use exact, non-empty UTF-8 strings.
 
-After the EDHOC handshake, only an encrypted RSMP `Version` message and its `MessageAck` or `MessageNotAck` exchange may occur before authorization completes. The authenticated credential subject **MUST** be authorized for the identity and Core version selected by the `Version` exchange before any other RSMP message is dispatched.
+After the EDHOC handshake, the site **MUST** send one encrypted RSMP `Version` request and the supervisor **MUST** answer an accepted request with one encrypted `Version` response. For site-to-site communication, the follower sends the request and the leader sends the response. These application roles apply in either TCP connection direction. Until local authorization completes, the only permitted RSMP messages are this request, this response, and their `MessageAck` or `MessageNotAck` acknowledgements.
 
-Because the complete `Version` syntax depends on the negotiated Core version, a receiver **MUST** use a two-stage validation procedure. It first performs only the version-independent structural checks needed to identify a `Version` message, enumerate the offered Core versions, and locate the configured peer. After selecting a mutually supported Core version, it **MUST** validate the complete `Version` message against that Core version's `Version` rules before SXL negotiation, authorization, acknowledgement, or any other connection-state transition. Bootstrap values **MUST NOT** be treated as authorized before complete validation succeeds. Failure is connection-fatal.
+For each received `Version`, the receiver first identifies the expected request or response from the application roles and exchange sequence, reads the offered Core versions, and locates the configured peer. It **MUST** then validate the complete message against the selected Core version before SXL negotiation, authorization, or positive acknowledgement. In Core 3.3.0, `step` must match the expected `Request` or `Response`. Earlier Core versions without `step` use the roles and sequence alone. If Core validation fails, the receiver **MUST** follow the applicable Core rejection procedure and close the connection.
+
+Each endpoint **MUST** verify that local policy authorizes the authenticated peer for the RSMP identity, role, and selected Core version before sending a `MessageAck` for the peer's `Version`. When receiving a `MessageAck` or `MessageNotAck` during this exchange, the endpoint **MUST** match its `oMId` to the `mId` of its own outstanding `Version`. An unexpected acknowledgement or a `MessageNotAck` for either `Version` is connection-fatal.
+
+Local authorization completes only when the endpoint has accepted and acknowledged the peer's `Version` and received a matching `MessageAck` for its own `Version`. Only then may it send or dispatch the next RSMP message in the selected Core version's startup sequence.
 
 The resulting authorization context consists of:
 
@@ -183,7 +187,7 @@ The resulting authorization context consists of:
 - authorized site or supervisor role; and
 - selected RSMP Core version.
 
-This context **MUST** be immutable for the lifetime of the connection. A second `Version` message or any attempt to change the identity, role, or Core version **MUST** close the secure connection. A different context requires a new TCP connection and a new initial EDHOC exchange.
+This context **MUST** be immutable for the lifetime of the connection. A repeated `Version` request, a repeated `Version` response, a `Version` from the wrong role, or any attempt to renegotiate the identity, role, or Core version **MUST** close the secure connection. A different context requires a new TCP connection and a new initial EDHOC exchange.
 
 ## 6. Initial channel establishment
 
@@ -196,13 +200,21 @@ TCP/EDHOC initiator                         TCP/EDHOC responder
         |<--------- edhoc(msg=2, EDHOC message_2) ----|
         |-- edhoc(msg=3, EDHOC message_3) ---------->|
         |<--------- edhoc(msg=4, EDHOC message_4) ----|
-        |                                             |
-        |========== encrypted RSMP Version ==========>|
 ```
 
 EDHOC message 4 is **REQUIRED**. Neither endpoint may create the application transport, send `data` or `rekey` frames, or process RSMP messages until message 4 has been successfully authenticated.
 
 A receiver expects the message numbers in the sequence shown above. An unexpected number, frame type, profile, version, field, or EDHOC state transition is fatal.
+
+After EDHOC completes, the encrypted RSMP exchange in Section 5.3 proceeds by application role. In this successful exchange, A and B represent the two distinct RSMP message IDs.
+
+```text
+Site or follower                             Supervisor or leader
+      |-- Version request  (mId=A) ------------------>|
+      |<----------------------- MessageAck (oMId=A) --|
+      |<----------------- Version response (mId=B) ---|
+      |-- MessageAck (oMId=B) ----------------------->|
+```
 
 ### 6.1 Handshake errors
 
@@ -319,7 +331,7 @@ This binds the ciphertext to the session, direction, epoch, index, and frame fam
 
 The plaintext recovered from a `data` frame **MUST** decode as exactly one deterministic-CBOR map. After decoding, the map is dispatched as one RSMP message and is subject to the normal RSMP Core and SXL validation and error-handling rules. Unauthenticated plaintext **MUST NOT** reach the RSMP dispatcher.
 
-A deterministic-CBOR decoding failure, COSE authentication failure, replay or ordering failure, authorization failure, or violation of Secure RSMP connection state **MUST** close the connection. After authorization has completed, an RSMP Core or SXL schema or semantic validation failure **MUST** be handled according to the applicable RSMP specification, including sending `MessageNotAck` where required. Sending or receiving an ordinary post-authorization `MessageNotAck` **MUST NOT** by itself close or rekey the secure channel. Failure of the protected initial `Version` exchange and an attempt to send a second `Version` remain connection-fatal as specified in Section 5.3.
+A deterministic-CBOR decoding failure, COSE authentication failure, replay or ordering failure, authorization failure, or violation of Secure RSMP connection state **MUST** close the connection. After authorization has completed, an RSMP Core or SXL schema or semantic validation failure **MUST** be handled according to the applicable RSMP specification, including sending `MessageNotAck` where required. Sending or receiving an ordinary post-authorization `MessageNotAck` **MUST NOT** by itself close or rekey the secure channel. Failure of the initial `Version` exchange, a repeated request or response, or attempted renegotiation is connection-fatal as specified in Section 5.3.
 
 ## 9. Traffic-key epochs and renewal
 
@@ -411,7 +423,10 @@ A conforming implementation **MUST** test at least:
 - exporter context identity ordering and the complete HKDF derivation;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
 - continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
-- selected-Core validation of the complete initial `Version`; authorization of identity, role, and Core version; pre-authorization message restrictions; immutable authorization context; and later `Version` rejection;
+- one protected `Version` request and one response, each acknowledged by `oMId`, for both site-opened and supervisor-opened TCP connections and for follower/leader startup;
+- selected-Core validation of both `Version` messages, including the expected `step` in Core 3.3.0 and role-based identification in supported earlier versions without `step`;
+- authorization of identity, role, and Core version at each endpoint, including that an acknowledgement alone cannot complete authorization and that other RSMP traffic is gated until local completion;
+- connection closure on a mismatched acknowledgement, a `MessageNotAck` for either `Version`, a repeated request or response, a wrong-role `Version`, or an attempt to change the authorization context;
 - initiator- and responder-triggered rekey, simultaneous triggers, fresh keys, stable session id, changed-identity rejection, new-key acknowledgement, old-key erasure, and all three mandatory limits;
 - rekey timeout, error control, invalid role, wrong epoch, unsolicited response, old-key acknowledgement, and data during rekey; and
 - epoch values above 255, unsigned 64-bit exhaustion, and refusal to wrap.

@@ -203,13 +203,6 @@ sequenceDiagram
     Listener-->>Connector: EDHOC message 2<br/>fresh key material and responder authentication
     Connector->>Listener: EDHOC message 3<br/>initiator authentication
     Listener-->>Connector: EDHOC message 4<br/>authenticated completion
-
-    Note over Connector,Listener: Both identities are authenticated<br/>Both derive the same session material
-
-    Connector->>Listener: Encrypted RSMP Version
-    Listener-->>Connector: Encrypted acknowledgement
-    Note over Connector,Listener: Authorize RSMP identity, role,<br/>and selected Core version
-    Connector->>Listener: Other encrypted RSMP messages may now flow
 ```
 
 All four initial EDHOC messages are required. No RSMP application message is
@@ -228,11 +221,32 @@ Authorization answers:
 > May this credential act as this particular RSMP identity and role, using this
 > Core version?
 
-The first encrypted `Version` exchange supplies the RSMP-level information
-needed for the second answer. Local policy compares it with the authenticated
-credential. Until that check succeeds, no other RSMP message is dispatched.
-The resulting identity, role, and Core version cannot change during the
-connection.
+The site sends the first encrypted `Version` request, even when the supervisor
+opened the TCP connection. For a connection between sites, the follower sends
+the request and the leader answers. Each side checks the peer's `Version`
+against the selected Core version and its local authorization policy before
+acknowledging it.
+
+```mermaid
+sequenceDiagram
+    participant Site as Site or follower
+    participant Supervisor as Supervisor or leader
+
+    Site->>Supervisor: Version request (mId=A)
+    Supervisor-->>Site: MessageAck (oMId=A)
+    Supervisor->>Site: Version response (mId=B)
+    Site-->>Supervisor: MessageAck (oMId=B)
+```
+
+All four messages are encrypted. A and B stand for the distinct IDs of the
+request and response. In Core 3.3.0, the `step` field identifies each as
+`Request` or `Response`. Earlier versions without `step` use the sender's
+role and the order of the exchange.
+
+Each endpoint continues Core startup once it has accepted and acknowledged
+the peer's `Version` and received the acknowledgement for its own. A
+`MessageNotAck` for either message ends the connection. The authorized
+identity, role, and Core version stay fixed until the connection closes.
 
 This separation stops a valid credential for one device from being reused to
 claim the identity or permissions of another device.
