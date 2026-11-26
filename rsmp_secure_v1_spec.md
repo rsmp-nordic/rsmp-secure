@@ -172,9 +172,20 @@ Authentication proves possession of a pinned credential. Authorization separatel
 
 Local policy **MUST** map each trusted credential subject to exactly one expected RSMP identity and role, and **MAY** restrict the permitted RSMP Core versions. Policy is deny-by-default. Identity comparisons use exact, non-empty UTF-8 strings.
 
+Before opening TCP, the connector **MUST** select the intended peer's pinned credential from the connection configuration. During EDHOC it **MUST** verify the responder against that pin before sending EDHOC message 3. A listener serving several peers **MUST** select the policy entry by the authenticated initiator credential and verify that the entry is permitted on this connection before exchanging RSMP messages. Both endpoints **MUST** enforce the configured peer role. On a site-to-site connection both endpoints are sites, and the connection configuration assigns the leader and follower roles. A missing policy entry, a different pin, or a role mismatch is connection-fatal.
+
 After the EDHOC handshake, the site **MUST** send one encrypted RSMP `Version` request and the supervisor **MUST** answer an accepted request with one encrypted `Version` response. For site-to-site communication, the follower sends the request and the leader sends the response. These application roles apply in either TCP connection direction. Until local authorization completes, the only permitted RSMP messages are this request, this response, and their `MessageAck` or `MessageNotAck` acknowledgements.
 
-For each received `Version`, the receiver first identifies the expected request or response from the application roles and exchange sequence, reads the offered Core versions, and locates the configured peer. It **MUST** then validate the complete message against the selected Core version before SXL negotiation, authorization, or positive acknowledgement. In Core 3.3.0, `step` must match the expected `Request` or `Response`. Earlier Core versions without `step` use the roles and sequence alone. If Core validation fails, the receiver **MUST** follow the applicable Core rejection procedure and close the connection.
+For each received `Version`, the receiver first identifies the expected request or response from the application roles and exchange sequence and reads the offered Core versions. It **MUST** then validate the complete message against the selected Core version before SXL negotiation, authorization, or positive acknowledgement. In Core 3.3.0, `step` must match the expected `Request` or `Response`. Earlier Core versions without `step` use the roles and sequence alone. If Core validation fails, the receiver **MUST** follow the applicable Core rejection procedure and close the connection.
+
+The authorized peer identity always comes from the policy entry for the authenticated credential. After Core validation, the receiver **MUST** apply the following identity checks for the selected Core version:
+
+| Received message | Core 3.3.0 | Earlier Core versions using `siteId` in both messages (including 3.2.2) |
+| --- | --- | --- |
+| Request from site or follower | The sole `siteId[0].sId` must equal the requesting peer's authorized site identity. | Apply the same check. Secure RSMP requires exactly one entry even when Core permits several. |
+| Response from supervisor or leader | Core requires a non-empty `supervisorId` string. Its value is informational. A valid value may differ from the authorized peer identity and **MUST NOT** affect authorization. | The response's `siteId` must contain exactly one entry whose `sId` equals the site or follower identity in the original request. The receiver authorizes the supervisor or leader using its credential policy entry. |
+
+A missing required field or a failed site identity check **MUST** trigger the applicable Core rejection procedure and close the connection. A selected Core version outside the peer's permitted versions is also connection-fatal. Neither a request nor a response may select a different credential policy entry.
 
 Each endpoint **MUST** verify that local policy authorizes the authenticated peer for the RSMP identity, role, and selected Core version before sending a `MessageAck` for the peer's `Version`. When receiving a `MessageAck` or `MessageNotAck` during this exchange, the endpoint **MUST** match its `oMId` to the `mId` of its own outstanding `Version`. An unexpected acknowledgement or a `MessageNotAck` for either `Version` is connection-fatal.
 
@@ -184,7 +195,7 @@ The resulting authorization context consists of:
 
 - authenticated credential subject;
 - authorized RSMP identity;
-- authorized site or supervisor role; and
+- authorized site or supervisor role, including the configured leader or follower role on a site-to-site connection; and
 - selected RSMP Core version.
 
 This context **MUST** be immutable for the lifetime of the connection. A repeated `Version` request, a repeated `Version` response, a `Version` from the wrong role, or any attempt to renegotiate the identity, role, or Core version **MUST** close the secure connection. A different context requires a new TCP connection and a new initial EDHOC exchange.
@@ -425,6 +436,9 @@ A conforming implementation **MUST** test at least:
 - continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
 - one protected `Version` request and one response, each acknowledged by `oMId`, for both site-opened and supervisor-opened TCP connections and for follower/leader startup;
 - selected-Core validation of both `Version` messages, including the expected `step` in Core 3.3.0 and role-based identification in supported earlier versions without `step`;
+- outgoing rejection of a different locally pinned peer, listener selection by authenticated credential, and enforcement of the configured application role and permitted Core versions;
+- acceptance of a single matching site ID in a site or follower request, rejection of missing, mismatched, or multiple IDs, and rejection of a legacy response whose sole site ID differs from the original request;
+- authorization of the configured supervisor or leader when a valid Core 3.3.0 `supervisorId` differs from its policy identity, rejection of a missing required `supervisorId`, and authorization of a legacy responder from its pin when Core supplies no responder identity;
 - authorization of identity, role, and Core version at each endpoint, including that an acknowledgement alone cannot complete authorization and that other RSMP traffic is gated until local completion;
 - connection closure on a mismatched acknowledgement, a `MessageNotAck` for either `Version`, a repeated request or response, a wrong-role `Version`, or an attempt to change the authorization context;
 - initiator- and responder-triggered rekey, simultaneous triggers, fresh keys, stable session id, changed-identity rejection, new-key acknowledgement, old-key erasure, and all three mandatory limits;

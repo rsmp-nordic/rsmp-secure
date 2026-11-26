@@ -243,6 +243,19 @@ request and response. In Core 3.3.0, the `step` field identifies each as
 `Request` or `Response`. Earlier versions without `step` use the sender's
 role and the order of the exchange.
 
+When a site connects to one of several trusted supervisors, its connection
+configuration selects that supervisor's pin before the handshake. A listener
+can serve several peers and finds the permitted identity and role from the
+credential each peer authenticates with.
+
+The request names the site, or the follower on a site-to-site connection.
+Its `siteId` list must contain exactly that one authorized site, even with
+Core 3.2.2, which allows multiple sites on a plain RSMP connection. In a
+legacy response the same field refers back to the requesting site. In Core
+3.3.0 the response carries a required, informational `supervisorId`. In both
+cases the supervisor's or leader's authorized identity comes from the local
+policy for its pinned credential.
+
 Each endpoint continues Core startup once it has accepted and acknowledged
 the peer's `Version` and received the acknowledgement for its own. A
 `MessageNotAck` for either message ends the connection. The authorized
