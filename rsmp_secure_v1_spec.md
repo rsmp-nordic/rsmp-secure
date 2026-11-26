@@ -375,7 +375,13 @@ An implementation **MUST** complete a rekey before any one of these per-directio
 | Ciphertext bytes, including AEAD tags | 68,719,476,736 bytes (64 GiB) |
 | Epoch lifetime | 7,200 seconds (2 hours) |
 
-Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. The message limit **MUST** be at least 3. The byte limit **MUST** reserve space for two maximum-sized old-epoch control frames. Rekey scheduling **MUST** reserve two old-epoch frame indices and sufficient bytes for the remaining control exchange. The rekey timeout is exactly two seconds, and time-based rekey starts sufficiently early to finish before the lifetime limit.
+Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. Each endpoint **MUST** reject a configuration that fails any of the following conditions:
+
+- The frame limit is at least 4 per direction. In a renewed epoch the responder needs room for the opening `rekey_ack`, one application frame, and two controls for the next renewal (`rekey_request` and `rekey_msg2`).
+- The ciphertext byte limit covers the largest `rekey_ack`, one maximum-sized application frame, and the reserve for two maximum-sized old-epoch control frames. Count the ciphertext field including its AEAD tag for each frame. For example, 196,660 bytes suffices using 65,536 bytes as a conservative bound for each of the three non-ack frames and 52 ciphertext bytes for the largest `rekey_ack`.
+- The epoch lifetime leaves time to send at least one application frame under the deployment's operating conditions before reserving the full two-second rekey timeout. A lifetime of two seconds or less is invalid.
+
+Before sending an application frame, the sender **MUST** check its frame and ciphertext byte counts including the proposed frame and both reserved control frames. A frame that fits exactly may be sent. If either limit would be exceeded, the sender defers the application frame and starts or requests renewal. Both directions count every protected control and data frame against the epoch whose keys protect it. Time-based renewal **MUST** start early enough to finish within the epoch lifetime.
 
 When renewal becomes due locally, the endpoint **MUST** pause application-data transmission. Section 9.3 defines which old-epoch data it can still receive and when it may resume sending. A failure, timeout, or inability to reserve the remaining control traffic within the epoch limits is fatal.
 
@@ -404,7 +410,7 @@ rekey-error = {
 }
 ```
 
-All controls are carried in `rekey` frames protected by `COSE_Encrypt0`. Except for `rekey_ack`, they use the current epoch and current traffic keys. `next_epoch` **MUST** equal `current_epoch + 1`.
+All controls are carried in `rekey` frames protected by `COSE_Encrypt0`. For a renewal starting in epoch `E`, every control carries `next_epoch = E + 1`. All controls except `rekey_ack` carry outer `epoch = E` and use epoch `E` keys. The acknowledgement carries outer `epoch = E + 1` and uses epoch `E + 1` keys.
 
 ### 9.3 Rekey exchange
 
@@ -436,7 +442,7 @@ The responder authenticates EDHOC message 3, verifies that the credential subjec
 
 The responder may resume application sends after sending `rekey_ack`. While sends are paused, each endpoint **MUST** defer outgoing RSMP messages, including any `MessageAck` or `MessageNotAck` owed for accepted frames, and continue processing rekey controls. On successful renewal it sends the deferred messages in order under the new keys. RSMP acknowledgements retain their original `oMId`.
 
-The session id and authorization context remain unchanged. Frame indices reset independently to 1 in both directions. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
+The session id and authorization context remain unchanged. The `rekey_ack` consumes responder-to-initiator index 1 in epoch `E + 1`, including one frame and its ciphertext bytes against that direction's new limits. The initiator **MUST** preserve that receive state when it installs the pending channel. The next responder frame uses index 2. The first initiator frame uses index 1. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
 
 Rekey **MUST** complete within two seconds. A party that can still authenticate a control failure **SHOULD** send exactly one `rekey_error` with code `failed`; both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
 
@@ -470,6 +476,8 @@ A conforming implementation **MUST** test at least:
 - authorization of identity, role, and Core version at each endpoint, including that an acknowledgement alone cannot complete authorization and that other RSMP traffic is gated until local completion;
 - connection closure on a mismatched acknowledgement, a `MessageNotAck` for either `Version`, a repeated request or response, a wrong-role `Version`, or an attempt to change the authorization context;
 - initiator- and responder-triggered rekey, simultaneous triggers, fresh keys, stable session id, changed-identity rejection, new-key acknowledgement, old-key erasure, and all three mandatory limits;
+- consecutive responder-requested renewals at the four-frame minimum, with application data in both directions between renewals, both acknowledgement epoch fields equal to the target epoch, and subsequent responder and initiator indices 2 and 1 respectively;
+- acceptance at the exact byte budget, deferral when a proposed send exceeds the remaining budget by one byte, and configuration rejection when the frame, byte, or lifetime budget leaves insufficient room for application traffic and renewal;
 - delivery of in-flight old-epoch data before the peer's first rekey control for either trigger and for crossing triggers, including deferral of an owed RSMP acknowledgement until the new epoch;
 - rejection of old-epoch data after each direction's first rekey control and new-epoch data before `rekey_ack`, with ordering, epoch limits, and the rekey timeout enforced throughout;
 - rekey timeout, error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and

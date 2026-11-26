@@ -376,8 +376,12 @@ For the responder it is the rekey request, or message 2 if it sent no request.
 Any later application data under the old keys closes the connection.
 
 The responder's rekey acknowledgement is the first frame protected by the new
-keys. It proves to the initiator that the responder installed those keys. The
-responder can send queued RSMP messages after sending that acknowledgement,
+keys. Verifying it confirms that both peers derived the same keys. Its outer
+epoch and its encrypted `next_epoch` both name the new epoch. It uses
+responder index 1, so the responder's next frame uses index 2. The initiator's
+first frame in that epoch uses index 1.
+
+The responder can send queued RSMP messages after sending the acknowledgement,
 and the initiator can send them after verifying it. This includes any RSMP
 acknowledgements owed for messages received during the pause. If rekey
 fails or takes more than two seconds, the connection closes rather than
@@ -391,8 +395,12 @@ Rekey must finish before any per-direction, per-epoch maximum is exceeded:
 | Ciphertext | 64 GiB |
 | Epoch lifetime | 2 hours |
 
-A deployment may choose lower limits. It cannot disable these limits or choose
-higher ones.
+A deployment may choose lower limits. At the four-frame minimum, the responder
+can send the opening acknowledgement, one application message, and the two
+controls it sends under that epoch's keys when it requests renewal.
+The byte budget must also fit those four frames, including their tags. The
+lifetime must leave time for application traffic before the two-second renewal
+window.
 
 ## Why this design is secure
 
