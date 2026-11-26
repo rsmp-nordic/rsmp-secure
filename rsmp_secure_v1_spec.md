@@ -1,4 +1,4 @@
-# Secure RSMP v1 - draft 1
+# Secure RSMP v1 - draft
 
 ## 1. Scope
 
