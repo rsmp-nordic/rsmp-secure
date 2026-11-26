@@ -361,16 +361,25 @@ sequenceDiagram
         Responder-->>Initiator: Encrypted rekey request (current keys)
     end
 
-    Note over Initiator,Responder: Application transmission pauses when rekey is required
     Initiator->>Responder: Rekey EDHOC message 1 (current keys)
     Responder-->>Initiator: Rekey EDHOC message 2 (current keys)
     Initiator->>Responder: Rekey EDHOC message 3 (current keys)
     Responder-->>Initiator: Rekey acknowledgement (new keys)
-    Note over Initiator,Responder: Increment epoch, reset indexes,<br/>resume traffic, erase old traffic secrets
+    Note over Initiator,Responder: Resume application sends under the new keys
 ```
 
-The acknowledgement is the first frame protected by the new keys. It proves to
-the initiator that the responder derived and installed the same keys. If rekey
+The two directions can carry traffic at the same time. For example, a site may
+receive a status request just after it starts renewal. It processes the request
+if it arrives before the peer's first rekey control. TCP puts that control
+after any data the peer already sent. For the initiator the control is message 1.
+For the responder it is the rekey request, or message 2 if it sent no request.
+Any later application data under the old keys closes the connection.
+
+The responder's rekey acknowledgement is the first frame protected by the new
+keys. It proves to the initiator that the responder installed those keys. The
+responder can send queued RSMP messages after sending that acknowledgement,
+and the initiator can send them after verifying it. This includes any RSMP
+acknowledgements owed for messages received during the pause. If rekey
 fails or takes more than two seconds, the connection closes rather than
 continuing with unsafe or ambiguous key state.
 

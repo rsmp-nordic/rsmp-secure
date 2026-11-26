@@ -377,7 +377,7 @@ An implementation **MUST** complete a rekey before any one of these per-directio
 
 Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. The message limit **MUST** be at least 3. The byte limit **MUST** reserve space for two maximum-sized old-epoch control frames. Rekey scheduling **MUST** reserve two old-epoch frame indices and sufficient bytes for the remaining control exchange. The rekey timeout is exactly two seconds, and time-based rekey starts sufficiently early to finish before the lifetime limit.
 
-When any limit becomes due, application-data transmission stops until rekey succeeds. A failure, timeout, or inability to reserve safe nonce space is fatal.
+When renewal becomes due locally, the endpoint **MUST** pause application-data transmission. Section 9.3 defines which old-epoch data it can still receive and when it may resume sending. A failure, timeout, or inability to reserve the remaining control traffic within the epoch limits is fatal.
 
 ### 9.2 Roles and request
 
@@ -423,13 +423,24 @@ Original initiator                            Original responder
 
 The embedded EDHOC exchange uses the same fixed profile and pinned credentials as the initial exchange, but fresh connection identifiers and ephemeral keys. EDHOC message 4 is not embedded in rekey. Instead, the responder's `rekey_ack`, authenticated as the first protected frame under the new epoch keys, confirms successful installation and possession of the new traffic keys.
 
+TCP orders frames independently in each direction. An endpoint **MUST** pause new application sends when it starts or requests renewal, or when it receives the peer's first authenticated rekey control. Any old-epoch data already being written **MUST** precede the sender's first rekey control on the stream. The receiver uses the following controls to determine where old-epoch application data ends:
+
+| Sender | First control after its last old-epoch `data` frame |
+| --- | --- |
+| Initiator | `rekey_msg1` |
+| Responder | `rekey_request` if sent, otherwise `rekey_msg2` |
+
+Until it authenticates that control from the peer, the receiver **MUST** continue reading and processing valid old-epoch `data` in order, even while waiting for a rekey reply. Each frame remains subject to the usual authentication, index, authorization, and epoch limits. Processing it does not restart the rekey timeout. After the control, any further old-epoch `data` from that peer is connection-fatal. These rules also apply when `rekey_request` and `rekey_msg1` cross.
+
 The responder authenticates EDHOC message 3, verifies that the credential subject is unchanged, derives and installs the new channel, then sends `rekey_ack` under the new keys. The initiator prepares a pending channel before sending message 3 but **MUST NOT** install it or resume application traffic until it authenticates the acknowledgement under the pending new keys.
+
+The responder may resume application sends after sending `rekey_ack`. While sends are paused, each endpoint **MUST** defer outgoing RSMP messages, including any `MessageAck` or `MessageNotAck` owed for accepted frames, and continue processing rekey controls. On successful renewal it sends the deferred messages in order under the new keys. RSMP acknowledgements retain their original `oMId`.
 
 The session id and authorization context remain unchanged. Frame indices reset independently to 1 in both directions. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
 
 Rekey **MUST** complete within two seconds. A party that can still authenticate a control failure **SHOULD** send exactly one `rekey_error` with code `failed`; both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
 
-Unsolicited responses, wrong roles, wrong epochs, application data during required or active rekey, an acknowledgement under old keys, changed peer identity, or malformed controls are fatal.
+Unsolicited responses, wrong roles, wrong epochs, new-epoch data before `rekey_ack`, a `rekey_ack` under old keys, changed peer identity, or malformed controls are fatal.
 
 ## 10. Failure handling and operations
 
@@ -459,7 +470,9 @@ A conforming implementation **MUST** test at least:
 - authorization of identity, role, and Core version at each endpoint, including that an acknowledgement alone cannot complete authorization and that other RSMP traffic is gated until local completion;
 - connection closure on a mismatched acknowledgement, a `MessageNotAck` for either `Version`, a repeated request or response, a wrong-role `Version`, or an attempt to change the authorization context;
 - initiator- and responder-triggered rekey, simultaneous triggers, fresh keys, stable session id, changed-identity rejection, new-key acknowledgement, old-key erasure, and all three mandatory limits;
-- rekey timeout, error control, invalid role, wrong epoch, unsolicited response, old-key acknowledgement, and data during rekey; and
+- delivery of in-flight old-epoch data before the peer's first rekey control for either trigger and for crossing triggers, including deferral of an owed RSMP acknowledgement until the new epoch;
+- rejection of old-epoch data after each direction's first rekey control and new-epoch data before `rekey_ack`, with ordering, epoch limits, and the rekey timeout enforced throughout;
+- rekey timeout, error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and
 - epoch values above 255, unsigned 64-bit exhaustion, and refusal to wrap.
 
 The normative CDDL artifact is `schemas/secure/rsmp-secure-v1.cddl`. CDDL establishes structure; implementations remain responsible for every semantic and cryptographic check stated in this document.
