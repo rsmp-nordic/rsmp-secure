@@ -1,5 +1,5 @@
 ; Secure RSMP v1 CDDL schema.
-SPDX-License-Identifier: MIT
+; SPDX-License-Identifier: MIT
 ;
 ; This file describes the normative CBOR structures for rsmp-secure-v1.
 ; It is a conformance artifact, not a runtime validator.
