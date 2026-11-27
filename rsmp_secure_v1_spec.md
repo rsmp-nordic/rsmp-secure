@@ -545,7 +545,7 @@ A conforming implementation **MUST** test at least:
 - rekey error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and
 - epoch values above 255, unsigned 64-bit exhaustion, and refusal to wrap.
 
-The normative CDDL artifact is `schemas/secure/rsmp-secure-v1.cddl`. CDDL establishes structure; implementations remain responsible for every semantic and cryptographic check stated in this document.
+The [normative Secure RSMP v1 CDDL schema](schemas/secure/rsmp-secure-v1.cddl) defines the CBOR structures. Implementations **MUST** also enforce the semantic and cryptographic requirements in this specification.
 
 ## 12. Normative references
 
