@@ -476,7 +476,7 @@ TCP orders frames independently in each direction. An endpoint **MUST** pause ne
 
 Until it authenticates that control from the peer, the receiver **MUST** continue reading and processing valid old-epoch `data` in order, even while waiting for a rekey reply. Each frame remains subject to the usual authentication, index, authorization, and epoch limits. Processing it does not restart the rekey timeout. After the control, any further old-epoch `data` from that peer is connection-fatal. These rules also apply when `rekey_request` and `rekey_msg1` cross.
 
-The responder authenticates EDHOC message 3, verifies that the credential subject is unchanged, derives and installs the new channel, then sends `rekey_ack` under the new keys. The initiator prepares a pending channel before sending message 3 but **MUST NOT** install it or resume application traffic until it authenticates the acknowledgement under the pending new keys.
+During rekey, each endpoint **MUST** verify that the peer authenticated with the exact pinned credential used in the initial handshake and that the pin is still trusted when installing the new channel (Section 10). The responder authenticates EDHOC message 3, derives and installs the new channel, then sends `rekey_ack` under the new keys. The initiator prepares a pending channel before sending message 3 but **MUST NOT** install it or resume application traffic until it authenticates the acknowledgement under the pending new keys.
 
 The responder may resume application sends after sending `rekey_ack`. While sends are paused, each endpoint **MUST** defer outgoing RSMP messages, including any `MessageAck` or `MessageNotAck` owed for accepted frames, and continue processing rekey controls. On successful renewal it sends the deferred messages in order under the new keys. RSMP acknowledgements retain their original `oMId`.
 
@@ -494,7 +494,11 @@ Long-term private keys, EDHOC session secrets, exporter results, traffic secrets
 
 Operational logs **SHOULD** record successful and failed authentication, authorization, rekey, credential selection, epoch changes, and reason categories. Logs **MUST NOT** contain private keys, traffic secrets, decrypted RSMP payloads unless explicitly required by policy, or peer-visible cryptographic diagnostics that create an oracle. Implementations **SHOULD** rate-limit repeated failed connection attempts.
 
-Credential provisioning, replacement, revocation, backup, and recovery are administrative responsibilities. Changes to pinned credentials or authorization policy apply to new connections; an active connection **SHOULD** be closed when its credential is revoked.
+Credential provisioning, replacement, revocation, backup, and recovery are administrative responsibilities. Each new connection **MUST** use the current local trust and authorization policy.
+
+Revocation takes effect at an endpoint when it applies a local trust update that removes or revokes the peer's pin. As part of that update, the endpoint **MUST** close every connection authenticated with that credential, including idle connections, and abort any pending handshake or rekey using it. From that point the endpoint **MUST NOT** send or dispatch further RSMP messages on those connections, including queued messages. A concurrent handshake or rekey **MUST NOT** install a channel using the revoked credential.
+
+A replacement credential requires a new TCP connection and initial EDHOC exchange, even when it has the same subject as the revoked credential.
 
 ## 11. Conformance requirements
 
@@ -504,6 +508,9 @@ A conforming implementation **MUST** test at least:
 - initial handshake framing at the 65,536-byte boundary, including rejection of a declared length of 65,537 from the prefix alone;
 - after each role's initial handshake completion, application of local receive limits to protected frames, including during the `Version` exchange and rekey. Where local limits permit, a valid protected frame larger than 65,536 bytes must pass the size check;
 - exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
+- closure of all active and idle connections using a locally revoked pin, with no queued RSMP message sent or dispatched on them after the update;
+- revocation during initial EDHOC and during rekey while `rekey_ack` is pending, including rejection of a late completion using the revoked credential;
+- rejection of a new connection using the revoked pin and successful authentication on a new connection using an authorized replacement with the same subject;
 - message 1 beginning with `00 04` for initial establishment and rekey, rejection of singleton arrays in either field, EAD rejection, and fresh connection identifiers;
 - responder completion only after successfully sending message 4 and initiator completion only after verifying it, including a failed send and a failed verification;
 - silent closure on invalid wrappers and received errors, and the Section 6.1 error code and information for a wrong suite, an unknown KID, and a malformed embedded message, with no fallback;

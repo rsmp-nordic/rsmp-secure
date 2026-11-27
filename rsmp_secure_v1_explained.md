@@ -174,10 +174,14 @@ the new credential, coordinating activation, and establishing a new connection.
 Overwriting one side without first updating its peers causes authentication to
 fail, which is the safe outcome.
 
-Removing or revoking a pinned credential prevents it from being accepted on new
-connections. An existing connection using a revoked credential should also be
-closed. Provisioning, replacement, revocation, backup, and recovery therefore
-need an explicit operational procedure and audit trail.
+Revocation takes effect at each endpoint when it applies the trust update.
+For example, when a site removes a supervisor's pin, it closes every connection
+using that pin, including idle ones. It also stops any handshake or rekey using
+the pin and stops sending or dispatching queued RSMP messages on those
+connections. A supervisor with a replacement key must prove possession of
+that key on a new connection, even if its credential subject stays the
+same. The deployment controls how quickly the update reaches each
+endpoint.
 
 ## How mutual authentication works
 
@@ -546,8 +550,8 @@ Secure RSMP also does not hide or prevent everything:
 
 - A compromised endpoint can expose plaintext, private keys, or active session
   secrets.
-- A stolen active endpoint private key can be used for impersonation until its
-  credential is revoked.
+- A stolen endpoint private key can be used for impersonation at a peer until
+  that peer applies the revocation.
 - Network observers can still see addresses, timing, frame sizes, and limited
   outer framing information. There is no padding.
 - Encryption does not prevent denial of service or stop an attacker from
