@@ -219,6 +219,10 @@ TCP/EDHOC initiator                         TCP/EDHOC responder
 
 EDHOC message 4 is **REQUIRED** for initial establishment. The responder completes its handshake when it has authenticated message 3 and successfully sent the complete message 4 frame. The initiator completes its handshake when it has received and successfully verified message 4. Each endpoint **MUST** reach its own completion event before creating the application transport, sending `data` or `rekey` frames, or processing RSMP messages.
 
+Each endpoint **MUST** enforce finite, positive, locally configurable timeouts for the initial handshake and for rekey (Section 9.3). The values may differ between exchanges and between peers. Each deadline **MUST** use a monotonic clock and cover the entire local exchange. Partial reads, completed frames, and progress on writes **MUST NOT** restart it. If the deadline expires before local completion, the endpoint **MUST** close the connection.
+
+The initial handshake timer starts when TCP connect succeeds at the initiator or TCP accept returns at the responder. It ends at that endpoint's message 4 completion event above, before the encrypted RSMP `Version` exchange.
+
 A receiver expects the message numbers in the sequence shown above. An unexpected number, frame type, profile, version, field, or EDHOC state transition is fatal.
 
 After EDHOC completes, the encrypted RSMP exchange in Section 5.3 proceeds by application role. In this successful exchange, A and B represent the two distinct RSMP message IDs.
@@ -244,8 +248,6 @@ Once the expected `edhoc` wrapper has passed validation, a failure to decode or 
 | Other failures, including a malformed embedded message, unsupported credential identifier type, or signature verification failure | 1 | Text string `EDHOC handshake failed` |
 
 Additional diagnostics stay local. An error reply terminates this exchange and **MUST NOT** trigger a retry with different parameters or a fallback to plaintext. Errors during encrypted rekey use the control defined in Section 9.3.
-
-The complete initial handshake **MUST** finish within two seconds. Timeout is fatal and closes the connection.
 
 ## 7. Exporter and key schedule
 
@@ -417,9 +419,9 @@ Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or c
 
 - The frame limit is at least 4 per direction. In a renewed epoch the responder needs room for the opening `rekey_ack`, one application frame, and two controls for the next renewal (`rekey_request` and `rekey_msg2`).
 - The ciphertext byte limit covers the largest `rekey_ack`, the largest application frame the endpoint will send, and two maximum-sized old-epoch controls it can send during renewal. Count only the ciphertext field including its AEAD tag for each frame. Use the endpoint's outbound sizes for this calculation. The initial handshake cap does not apply to these frames.
-- The epoch lifetime leaves time to send at least one application frame under the deployment's operating conditions before reserving the full two-second rekey timeout. A lifetime of two seconds or less is invalid.
+- The epoch lifetime leaves time to send at least one application frame under the deployment's operating conditions as well as the full configured rekey timeout. A lifetime less than or equal to that timeout is invalid.
 
-Before sending an application frame, the sender **MUST** check its frame and ciphertext byte counts including the proposed frame and both reserved control frames. A frame that fits exactly may be sent. If either limit would be exceeded, the sender defers the application frame and starts or requests renewal. Both directions count every protected control and data frame against the epoch whose keys protect it. Time-based renewal **MUST** start early enough to finish within the epoch lifetime.
+Before sending an application frame, the sender **MUST** check its frame and ciphertext byte counts including the proposed frame and both reserved control frames. A frame that fits exactly may be sent. If either limit would be exceeded, the sender defers the application frame and starts or requests renewal. Both directions count every protected control and data frame against the epoch whose keys protect it. An endpoint **MUST** start or request time-based renewal while at least its full configured rekey timeout remains in the epoch.
 
 When renewal becomes due locally, the endpoint **MUST** pause application-data transmission. Section 9.3 defines which old-epoch data it can still receive and when it may resume sending. A failure, timeout, or inability to reserve the remaining control traffic within the epoch limits is fatal.
 
@@ -467,6 +469,8 @@ Original initiator                            Original responder
 
 The embedded EDHOC exchange uses the same fixed profile and pinned credentials as the initial exchange, but fresh connection identifiers and ephemeral keys. EDHOC message 4 is not embedded in rekey. Instead, the responder's `rekey_ack`, authenticated as the first protected frame under the new epoch keys, confirms successful installation and possession of the new traffic keys.
 
+An endpoint starts its rekey timer when it starts or requests renewal, before waiting to write its first control. If the peer triggers renewal first, the timer starts when the endpoint authenticates the peer's first renewal control. A responder that sends `rekey_request` includes the wait for `rekey_msg1` in its deadline. Crossing triggers **MUST NOT** restart the timer. The responder completes renewal when it successfully sends the complete `rekey_ack` frame. The initiator completes renewal when it verifies that acknowledgement and installs the new epoch. Pending RSMP acknowledgement timers continue to run during renewal.
+
 TCP orders frames independently in each direction. An endpoint **MUST** pause new application sends when it starts or requests renewal, or when it receives the peer's first authenticated rekey control. Any old-epoch data already being written **MUST** precede the sender's first rekey control on the stream. The receiver uses the following controls to determine where old-epoch application data ends:
 
 | Sender | First control after its last old-epoch `data` frame |
@@ -482,7 +486,7 @@ The responder may resume application sends after sending `rekey_ack`. While send
 
 The session id and authorization context remain unchanged. The `rekey_ack` consumes responder-to-initiator index 1 in epoch `E + 1`, including one frame and its ciphertext bytes against that direction's new limits. The initiator **MUST** preserve that receive state when it installs the pending channel. The next responder frame uses index 2. The first initiator frame uses index 1. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
 
-Rekey **MUST** complete within two seconds. A party that can still authenticate a control failure **SHOULD** send exactly one `rekey_error` with code `failed`; both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
+On a control failure, a party that can still authenticate the error **SHOULD** send exactly one `rekey_error` with code `failed` if it can do so before the deadline. Both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
 
 Unsolicited responses, wrong roles, wrong epochs, new-epoch data before `rekey_ack`, a `rekey_ack` under old keys, changed peer identity, or malformed controls are fatal.
 
@@ -513,6 +517,7 @@ A conforming implementation **MUST** test at least:
 - rejection of a new connection using the revoked pin and successful authentication on a new connection using an authorized replacement with the same subject;
 - message 1 beginning with `00 04` for initial establishment and rekey, rejection of singleton arrays in either field, EAD rejection, and fresh connection identifiers;
 - responder completion only after successfully sending message 4 and initiator completion only after verifying it, including a failed send and a failed verification;
+- enforcement of independently configured handshake and rekey deadlines, including handshake expiry with a silent peer or partial frames and rejection of disabled, non-finite, or non-positive timeouts;
 - silent closure on invalid wrappers and received errors, and the Section 6.1 error code and information for a wrong suite, an unknown KID, and a malformed embedded message, with no fallback;
 - exporter context identity ordering and all six outputs of the Section 7 key schedule test vector;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
@@ -532,7 +537,9 @@ A conforming implementation **MUST** test at least:
 - acceptance at the exact byte budget, deferral when a proposed send exceeds the remaining budget by one byte, and configuration rejection when the frame, byte, or lifetime budget leaves insufficient room for application traffic and renewal;
 - delivery of in-flight old-epoch data before the peer's first rekey control for either trigger and for crossing triggers, including deferral of an owed RSMP acknowledgement until the new epoch;
 - rejection of old-epoch data after each direction's first rekey control and new-epoch data before `rekey_ack`, with ordering, epoch limits, and the rekey timeout enforced throughout;
-- rekey timeout, error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and
+- rekey expiry while waiting to write, while a requesting responder waits for message 1, and while the initiator waits for the acknowledgement, including crossing triggers that leave the original deadline in force;
+- time-based renewal with the full configured timeout reserved, and continued operation of pending RSMP acknowledgement timers during renewal;
+- rekey error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and
 - epoch values above 255, unsigned 64-bit exhaustion, and refusal to wrap.
 
 The normative CDDL artifact is `schemas/secure/rsmp-secure-v1.cddl`. CDDL establishes structure; implementations remain responsible for every semantic and cryptographic check stated in this document.

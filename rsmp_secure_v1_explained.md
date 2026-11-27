@@ -212,7 +212,9 @@ sequenceDiagram
 All four initial EDHOC messages are required. Once the listener has verified
 message 3 and successfully sent message 4, it can start the encrypted RSMP
 exchange in its application role. The connector can do so once it has verified
-message 4. A handshake failure or a two-second timeout closes the connection.
+message 4. Each endpoint starts its handshake timer when it connects or accepts
+the TCP connection. It closes the connection if the whole handshake exceeds
+its locally configured timeout, even if some messages have arrived.
 For example, a listener that receives a well-formed message 1 selecting an
 unsupported suite reports suite 4 in an EDHOC error and closes. The connector
 also closes on receipt of the error.
@@ -394,9 +396,12 @@ first frame in that epoch uses index 1.
 
 The responder can send queued RSMP messages after sending the acknowledgement,
 and the initiator can send them after verifying it. This includes any RSMP
-acknowledgements owed for messages received during the pause. If rekey
-fails or takes more than two seconds, the connection closes rather than
-continuing with unsafe or ambiguous key state.
+acknowledgements owed for messages received during the pause. Each endpoint
+has a configurable timeout for the whole renewal. For example, a responder
+that requests renewal starts its timer before writing the request, so the
+wait for the initiator's reply counts. If renewal fails or the deadline
+expires, the endpoint closes the connection. Outstanding RSMP acknowledgement
+timers keep running during the pause.
 
 Rekey must finish before any per-direction, per-epoch maximum is exceeded:
 
@@ -410,8 +415,8 @@ A deployment may choose lower limits. At the four-frame minimum, the responder
 can send the opening acknowledgement, one application message, and the two
 controls it sends under that epoch's keys when it requests renewal.
 The byte budget must also fit those four frames, including their tags. The
-lifetime must leave time for application traffic before the two-second renewal
-window.
+lifetime must leave time for application traffic and the full configured
+rekey timeout.
 
 ## Why this design is secure
 
