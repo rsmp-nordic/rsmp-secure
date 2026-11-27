@@ -18,12 +18,16 @@ messages cannot simply be read, modified, injected, reordered, or replayed.
 
 ## The short version
 
-Each endpoint has two long-term files:
+Each endpoint has a long-term Ed25519 signing key and a public credential.
 
-- A **private key** is its secret proof of identity. It stays on the endpoint
-  that owns it.
+- The endpoint uses its **private key** to sign during the handshake. It can
+  load the key from a file or ask a keystore or secure element to sign.
 - A **credential** contains the endpoint's name, public key, and key identifier.
   Copies are installed on peers that are allowed to trust that endpoint.
+
+At startup, the endpoint checks that its signing key matches the public key in
+its own credential. A secure element can sign a fresh local challenge so the
+endpoint can verify the signature without exporting the private key.
 
 When a connection starts, EDHOC performs a mutually authenticated handshake.
 The endpoints use their long-term identity keys to authenticate the handshake
@@ -174,10 +178,14 @@ the new credential, coordinating activation, and establishing a new connection.
 Overwriting one side without first updating its peers causes authentication to
 fail, which is the safe outcome.
 
-Removing or revoking a pinned credential prevents it from being accepted on new
-connections. An existing connection using a revoked credential should also be
-closed. Provisioning, replacement, revocation, backup, and recovery therefore
-need an explicit operational procedure and audit trail.
+Revocation takes effect at each endpoint when it applies the trust update.
+For example, when a site removes a supervisor's pin, it closes every connection
+using that pin, including idle ones. It also stops any handshake or rekey using
+the pin and stops sending or dispatching queued RSMP messages on those
+connections. A supervisor with a replacement key must prove possession of
+that key on a new connection, even if its credential subject stays the
+same. The deployment controls how quickly the update reaches each
+endpoint.
 
 ## How mutual authentication works
 
@@ -203,19 +211,17 @@ sequenceDiagram
     Listener-->>Connector: EDHOC message 2<br/>fresh key material and responder authentication
     Connector->>Listener: EDHOC message 3<br/>initiator authentication
     Listener-->>Connector: EDHOC message 4<br/>authenticated completion
-
-    Note over Connector,Listener: Both identities are authenticated<br/>Both derive the same session material
-
-    Connector->>Listener: Encrypted RSMP Version
-    Listener-->>Connector: Encrypted acknowledgement
-    Note over Connector,Listener: Authorize RSMP identity, role,<br/>and selected Core version
-    Connector->>Listener: Other encrypted RSMP messages may now flow
 ```
 
-All four initial EDHOC messages are required. No RSMP application message is
-accepted before message 4 has been authenticated. A failure or a two-second
-timeout closes the connection, and Secure RSMP never falls back to plaintext on
-that connection.
+All four initial EDHOC messages are required. Once the listener has verified
+message 3 and successfully sent message 4, it can start the encrypted RSMP
+exchange in its application role. The connector can do so once it has verified
+message 4. Each endpoint starts its handshake timer when it connects or accepts
+the TCP connection. It closes the connection if the whole handshake exceeds
+its locally configured timeout, even if some messages have arrived.
+For example, a listener that receives a well-formed message 1 selecting an
+unsupported suite reports suite 4 in an EDHOC error and closes. The connector
+also closes on receipt of the error.
 
 ### Authentication is not authorization
 
@@ -228,11 +234,45 @@ Authorization answers:
 > May this credential act as this particular RSMP identity and role, using this
 > Core version?
 
-The first encrypted `Version` exchange supplies the RSMP-level information
-needed for the second answer. Local policy compares it with the authenticated
-credential. Until that check succeeds, no other RSMP message is dispatched.
-The resulting identity, role, and Core version cannot change during the
-connection.
+The site sends the first encrypted `Version` request, even when the supervisor
+opened the TCP connection. For a connection between sites, the follower sends
+the request and the leader answers. Each side checks the peer's `Version`
+against the selected Core version and its local authorization policy before
+acknowledging it.
+
+```mermaid
+sequenceDiagram
+    participant Site as Site or follower
+    participant Supervisor as Supervisor or leader
+
+    Site->>Supervisor: Version request (mId=A)
+    Supervisor-->>Site: MessageAck (oMId=A)
+    Supervisor->>Site: Version response (mId=B)
+    Site-->>Supervisor: MessageAck (oMId=B)
+```
+
+All four messages are encrypted. A and B stand for the distinct IDs of the
+request and response. In Core 3.3.0, the `step` field identifies each as
+`Request` or `Response`. Earlier versions without `step` use the sender's
+role and the order of the exchange.
+
+When a site connects to one of several trusted supervisors, its connection
+configuration selects that supervisor's pin before the handshake. A listener
+can serve several peers and finds the permitted identity and role from the
+credential each peer authenticates with.
+
+The request names the site, or the follower on a site-to-site connection.
+Its `siteId` list must contain exactly that one authorized site, even with
+Core 3.2.2, which allows multiple sites on a plain RSMP connection. In a
+legacy response the same field refers back to the requesting site. In Core
+3.3.0 the response carries a required, informational `supervisorId`. In both
+cases the supervisor's or leader's authorized identity comes from the local
+policy for its pinned credential.
+
+Each endpoint continues Core startup once it has accepted and acknowledged
+the peer's `Version` and received the acknowledgement for its own. A
+`MessageNotAck` for either message ends the connection. The authorized
+identity, role, and Core version stay fixed until the connection closes.
 
 This separation stops a valid credential for one device from being reused to
 claim the identity or permissions of another device.
@@ -250,16 +290,18 @@ After EDHOC succeeds, both endpoints independently perform the same derivation:
 flowchart LR
     edhoc[Authenticated EDHOC result] --> exporter[EDHOC exporter]
     identities[Both credential identities<br/>and rsmp-secure-v1 profile] --> exporter
-    exporter --> hkdf[HKDF-SHA-256 key derivation]
-    hkdf --> session[Session ID]
-    hkdf --> i2r[Initiator-to-responder<br/>key and nonce prefix]
-    hkdf --> r2i[Responder-to-initiator<br/>key and nonce prefix]
+    exporter -->|HKDF-SHA-256| traffic[Traffic secret for this epoch]
+    traffic -->|HKDF| session[Session ID<br/>initial exchange only]
+    traffic -->|HKDF per label| i2r[Initiator-to-responder<br/>key and nonce prefix]
+    traffic -->|HKDF per label| r2i[Responder-to-initiator<br/>key and nonce prefix]
 ```
 
 Including both authenticated identities and the exact profile name in the
 derivation binds the keys to this Secure RSMP context. Separate keys and nonce
 prefixes for each direction prevent traffic in one direction from sharing the
-same cryptographic state as traffic in the other.
+same cryptographic state as traffic in the other. At rekey, a fresh EDHOC
+exporter result supplies the next epoch's traffic secret. The endpoints replace
+the directional keys and nonce prefixes and keep the original session ID.
 
 Because the session keys depend on fresh ephemeral X25519 material, recording a
 connection and stealing a long-term Ed25519 key later is not enough to decrypt
@@ -281,14 +323,18 @@ flowchart LR
     frame --> network[Network]
 ```
 
-CBOR is a compact, unambiguous representation of the message; it is not itself
-encryption. COSE provides the standard protected container. ChaCha20/Poly1305
-is an authenticated-encryption algorithm, which produces both ciphertext and
-an authentication tag.
+CBOR preserves the types that Core and the SXL need to validate. For example,
+`1` travels as an integer, `1.0` as a float, and `"1.0"` as text. Timestamps
+and base64 values also stay text. Object keys have a defined order on the
+wire, while array elements keep their original order. COSE carries the
+encrypted CBOR and its ChaCha20/Poly1305 authentication tag.
 
-On receipt, the peer first checks the expected frame index and authentication
-tag. Only if those checks succeed does it decrypt and pass the recovered RSMP
-message to normal RSMP validation and dispatch.
+The receiver checks the frame index, authenticates the contents, and checks
+the payload encoding before handing the message to RSMP. A duplicate object
+key anywhere in the payload closes the connection. A well-encoded message
+with the wrong type for an RSMP field reaches Core or SXL validation. After
+authorization, the peer sends `MessageNotAck` where required and can continue
+processing messages on the same connection.
 
 The authentication tag covers not only the encrypted message but also security
 context including:
@@ -332,18 +378,34 @@ sequenceDiagram
         Responder-->>Initiator: Encrypted rekey request (current keys)
     end
 
-    Note over Initiator,Responder: Application transmission pauses when rekey is required
     Initiator->>Responder: Rekey EDHOC message 1 (current keys)
     Responder-->>Initiator: Rekey EDHOC message 2 (current keys)
     Initiator->>Responder: Rekey EDHOC message 3 (current keys)
     Responder-->>Initiator: Rekey acknowledgement (new keys)
-    Note over Initiator,Responder: Increment epoch, reset indexes,<br/>resume traffic, erase old traffic secrets
+    Note over Initiator,Responder: Resume application sends under the new keys
 ```
 
-The acknowledgement is the first frame protected by the new keys. It proves to
-the initiator that the responder derived and installed the same keys. If rekey
-fails or takes more than two seconds, the connection closes rather than
-continuing with unsafe or ambiguous key state.
+The two directions can carry traffic at the same time. For example, a site may
+receive a status request just after it starts renewal. It processes the request
+if it arrives before the peer's first rekey control. TCP puts that control
+after any data the peer already sent. For the initiator the control is message 1.
+For the responder it is the rekey request, or message 2 if it sent no request.
+Any later application data under the old keys closes the connection.
+
+The responder's rekey acknowledgement is the first frame protected by the new
+keys. Verifying it confirms that both peers derived the same keys. Its outer
+epoch and its encrypted `next_epoch` both name the new epoch. It uses
+responder index 1, so the responder's next frame uses index 2. The initiator's
+first frame in that epoch uses index 1.
+
+The responder can send queued RSMP messages after sending the acknowledgement,
+and the initiator can send them after verifying it. This includes any RSMP
+acknowledgements owed for messages received during the pause. Each endpoint
+has a configurable timeout for the whole renewal. For example, a responder
+that requests renewal starts its timer before writing the request, so the
+wait for the initiator's reply counts. If renewal fails or the deadline
+expires, the endpoint closes the connection. Outstanding RSMP acknowledgement
+timers keep running during the pause.
 
 Rekey must finish before any per-direction, per-epoch maximum is exceeded:
 
@@ -353,8 +415,12 @@ Rekey must finish before any per-direction, per-epoch maximum is exceeded:
 | Ciphertext | 64 GiB |
 | Epoch lifetime | 2 hours |
 
-A deployment may choose lower limits. It cannot disable these limits or choose
-higher ones.
+A deployment may choose lower limits. At the four-frame minimum, the responder
+can send the opening acknowledgement, one application message, and the two
+controls it sends under that epoch's keys when it requests renewal.
+The byte budget must also fit those four frames, including their tags. The
+lifetime must leave time for application traffic and the full configured
+rekey timeout.
 
 ## Why this design is secure
 
@@ -493,8 +559,8 @@ Secure RSMP also does not hide or prevent everything:
 
 - A compromised endpoint can expose plaintext, private keys, or active session
   secrets.
-- A stolen active endpoint private key can be used for impersonation until its
-  credential is revoked.
+- A stolen endpoint private key can be used for impersonation at a peer until
+  that peer applies the revocation.
 - Network observers can still see addresses, timing, frame sizes, and limited
   outer framing information. There is no padding.
 - Encryption does not prevent denial of service or stop an attacker from

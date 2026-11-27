@@ -35,7 +35,7 @@ Secure RSMP v1 provides:
 
 ### 2.2 Trust boundary
 
-The protected path begins and ends at the processes that hold the long-term private keys and terminate EDHOC and COSE. An intermediary preserves end-to-end protection only if it forwards Secure RSMP frames unchanged. Any component that decrypts, translates, inspects plaintext, or re-encrypts traffic is a trusted endpoint and requires a separate Secure RSMP channel on each side.
+The protected path begins and ends at the processes that use the long-term signing keys and terminate EDHOC and COSE. An intermediary preserves end-to-end protection only if it forwards Secure RSMP frames unchanged. Any component that decrypts, translates, inspects plaintext, or re-encrypts traffic is a trusted endpoint and requires a separate Secure RSMP channel on each side.
 
 The profile assumes that peer credentials and authorization policy are provisioned through an authenticated administrative process. A pinned credential is a trust anchor; possession of a syntactically valid credential is not sufficient.
 
@@ -65,7 +65,7 @@ An implementation claiming conformance to `rsmp-secure-v1` **MUST** use exactly 
 
 The profile name is the exact UTF-8 string `rsmp-secure-v1`, and the Secure RSMP wire version is the integer `1`.
 
-The offered EDHOC method list **MUST** be `[0]`, and the offered cipher-suite list **MUST** be `[4]`. Implementations **MUST NOT** negotiate, accept, or fall back to another method, cipher suite, profile, or plaintext RSMP on the same connection.
+In EDHOC message 1, `METHOD` **MUST** be the CBOR integer `0` and `SUITES_I` **MUST** be the CBOR integer `4`. These are the first two items of the RFC 9528 CBOR Sequence, so the embedded EDHOC bytes begin with hex `00 04`. A receiver **MUST** reject an array in either position. This encoding applies to both initial establishment and rekey. Implementations **MUST NOT** negotiate, accept, or fall back to another method, cipher suite, profile, or plaintext RSMP on the same connection.
 
 Secure RSMP v1 **MUST NOT** send or accept EDHOC External Authorization Data (EAD), whether critical or non-critical. Algorithm agility, alternate credentials, or post-quantum mechanisms require a separately named future profile with independent conformance rules. Such a profile **MUST NOT** introduce downgrade negotiation into `rsmp-secure-v1`.
 
@@ -76,9 +76,13 @@ Every Secure RSMP frame is encoded as:
 1. a four-byte unsigned big-endian length; followed by
 2. exactly that many bytes of deterministic CBOR.
 
-The length counts the CBOR bytes only. A frame **MUST NOT** exceed 65,536 CBOR bytes. A receiver **MUST** reject an oversized, truncated, non-deterministic, or malformed frame and close the connection.
+The length counts the CBOR bytes only. During the initial EDHOC handshake, a frame **MUST NOT** exceed 65,536 CBOR bytes (64 KiB), including the wrapper. This limit applies through message 4 and to initial handshake errors. It ends at the endpoint's local handshake completion event in Section 6.
 
-All maps defined by this specification are closed maps: a conforming sender **MUST** include every specified field exactly once and **MUST NOT** include unknown fields. A receiver **MUST** reject missing, duplicate, or unknown fields, wrong CBOR types, non-minimal integer encodings, and non-deterministic map ordering.
+After initial EDHOC completion, the four-byte prefix can represent up to 4,294,967,295 CBOR bytes. The profile imposes no additional frame-size cap. This rule applies from the first protected `Version` message and throughout rekey. An endpoint **MAY** enforce local send and receive limits according to its available resources.
+
+The receiver **MUST** check the declared length against the applicable limit before allocating a buffer for the declared size or reading the frame body. An oversized, truncated, non-deterministic, or malformed frame **MUST** close the connection.
+
+The maps defining the security envelope, credentials, key derivation inputs, authenticated data, and rekey controls are closed. A sender **MUST** include exactly the specified fields, each once. A receiver **MUST** reject missing, duplicate, or unknown fields, wrong CBOR types, non-minimal integer encodings, and non-deterministic map ordering. Section 8.1 defines the application payload. The selected RSMP Core version and SXL determine how to handle its attributes.
 
 The following CDDL is an overview of the outer frame family:
 
@@ -121,7 +125,7 @@ The `edhoc` byte string is the complete EDHOC message. The Secure RSMP wrapper i
 
 ### 5.1 Credential format
 
-Each endpoint has one Ed25519 private key and one exact, deterministic-CBOR CCS credential. The private-key file contains the 32-byte Ed25519 private seed followed by the corresponding 32-byte public key. It **MUST** be kept confidential and **MUST NOT** be carried on the wire or included in the credential.
+Each endpoint has one Ed25519 signing key and one deterministic-CBOR CCS credential. Private-key storage is implementation-defined. For example, an endpoint can use a file containing the 32-byte Ed25519 seed followed by the corresponding 32-byte public key, an operating-system keystore, or a non-exportable key in a secure element. The private key **MUST** be kept confidential and **MUST NOT** be carried in Secure RSMP messages or included in the credential.
 
 The `.cred` file is exactly:
 
@@ -156,7 +160,9 @@ The KID **MUST** equal the first 16 bytes of `SHA-256(raw_ed25519_public_key)`. 
 
 The credential **MUST** contain exactly these fields. It is neither self-signed nor wrapped in `COSE_Sign1`. Trust is established by pinning the complete `.cred` bytes through an authenticated provisioning process.
 
-At startup, an implementation **MUST** verify deterministic encoding, exact map shape, subject validity, key and KID lengths, derived KID correctness, correspondence between the local private and public key, and correspondence between the local public key and local credential. Duplicate trusted subjects or duplicate trusted KIDs **MUST** be rejected.
+At startup, an implementation **MUST** verify deterministic credential encoding, exact map shape, subject validity, public key and KID lengths, and derived KID correctness. Duplicate trusted subjects or duplicate trusted KIDs **MUST** be rejected.
+
+Before accepting or initiating Secure RSMP connections, the endpoint **MUST** verify at startup that its configured signing key matches the public key in its local credential. For example, it can sign a fresh local challenge and verify the signature with the credential's public key. If the endpoint uses the seed-plus-public-key file format described above, it **MUST** derive the public key from the seed and verify that it matches both the stored public key and the credential. If verification fails, the endpoint **MUST NOT** use that configuration.
 
 ### 5.2 EDHOC authentication
 
@@ -172,18 +178,33 @@ Authentication proves possession of a pinned credential. Authorization separatel
 
 Local policy **MUST** map each trusted credential subject to exactly one expected RSMP identity and role, and **MAY** restrict the permitted RSMP Core versions. Policy is deny-by-default. Identity comparisons use exact, non-empty UTF-8 strings.
 
-After the EDHOC handshake, only an encrypted RSMP `Version` message and its `MessageAck` or `MessageNotAck` exchange may occur before authorization completes. The authenticated credential subject **MUST** be authorized for the identity and Core version selected by the `Version` exchange before any other RSMP message is dispatched.
+Before opening TCP, the connector **MUST** select the intended peer's pinned credential from the connection configuration. During EDHOC it **MUST** verify the responder against that pin before sending EDHOC message 3. A listener serving several peers **MUST** select the policy entry by the authenticated initiator credential and verify that the entry is permitted on this connection before exchanging RSMP messages. Both endpoints **MUST** enforce the configured peer role. On a site-to-site connection both endpoints are sites, and the connection configuration assigns the leader and follower roles. A missing policy entry, a different pin, or a role mismatch is connection-fatal.
 
-Because the complete `Version` syntax depends on the negotiated Core version, a receiver **MUST** use a two-stage validation procedure. It first performs only the version-independent structural checks needed to identify a `Version` message, enumerate the offered Core versions, and locate the configured peer. After selecting a mutually supported Core version, it **MUST** validate the complete `Version` message against that Core version's `Version` rules before SXL negotiation, authorization, acknowledgement, or any other connection-state transition. Bootstrap values **MUST NOT** be treated as authorized before complete validation succeeds. Failure is connection-fatal.
+After the EDHOC handshake, the site **MUST** send one encrypted RSMP `Version` request and the supervisor **MUST** answer an accepted request with one encrypted `Version` response. For site-to-site communication, the follower sends the request and the leader sends the response. These application roles apply in either TCP connection direction. Until local authorization completes, the only permitted RSMP messages are this request, this response, and their `MessageAck` or `MessageNotAck` acknowledgements.
+
+For each received `Version`, the receiver first identifies the expected request or response from the application roles and exchange sequence and reads the offered Core versions. It **MUST** then validate the complete message against the selected Core version before SXL negotiation, authorization, or positive acknowledgement. In Core 3.3.0, `step` must match the expected `Request` or `Response`. Earlier Core versions without `step` use the roles and sequence alone. If Core validation fails, the receiver **MUST** follow the applicable Core rejection procedure and close the connection.
+
+The authorized peer identity always comes from the policy entry for the authenticated credential. After Core validation, the receiver **MUST** apply the following identity checks for the selected Core version:
+
+| Received message | Core 3.3.0 | Earlier Core versions using `siteId` in both messages (including 3.2.2) |
+| --- | --- | --- |
+| Request from site or follower | The sole `siteId[0].sId` must equal the requesting peer's authorized site identity. | Apply the same check. Secure RSMP requires exactly one entry even when Core permits several. |
+| Response from supervisor or leader | Core requires a non-empty `supervisorId` string. Its value is informational. A valid value may differ from the authorized peer identity and **MUST NOT** affect authorization. | The response's `siteId` must contain exactly one entry whose `sId` equals the site or follower identity in the original request. The receiver authorizes the supervisor or leader using its credential policy entry. |
+
+A missing required field or a failed site identity check **MUST** trigger the applicable Core rejection procedure and close the connection. A selected Core version outside the peer's permitted versions is also connection-fatal. Neither a request nor a response may select a different credential policy entry.
+
+Each endpoint **MUST** verify that local policy authorizes the authenticated peer for the RSMP identity, role, and selected Core version before sending a `MessageAck` for the peer's `Version`. When receiving a `MessageAck` or `MessageNotAck` during this exchange, the endpoint **MUST** match its `oMId` to the `mId` of its own outstanding `Version`. An unexpected acknowledgement or a `MessageNotAck` for either `Version` is connection-fatal.
+
+Local authorization completes only when the endpoint has accepted and acknowledged the peer's `Version` and received a matching `MessageAck` for its own `Version`. Only then may it send or dispatch the next RSMP message in the selected Core version's startup sequence.
 
 The resulting authorization context consists of:
 
 - authenticated credential subject;
 - authorized RSMP identity;
-- authorized site or supervisor role; and
+- authorized site or supervisor role, including the configured leader or follower role on a site-to-site connection; and
 - selected RSMP Core version.
 
-This context **MUST** be immutable for the lifetime of the connection. A second `Version` message or any attempt to change the identity, role, or Core version **MUST** close the secure connection. A different context requires a new TCP connection and a new initial EDHOC exchange.
+This context **MUST** be immutable for the lifetime of the connection. A repeated `Version` request, a repeated `Version` response, a `Version` from the wrong role, or any attempt to renegotiate the identity, role, or Core version **MUST** close the secure connection. A different context requires a new TCP connection and a new initial EDHOC exchange.
 
 ## 6. Initial channel establishment
 
@@ -196,21 +217,39 @@ TCP/EDHOC initiator                         TCP/EDHOC responder
         |<--------- edhoc(msg=2, EDHOC message_2) ----|
         |-- edhoc(msg=3, EDHOC message_3) ---------->|
         |<--------- edhoc(msg=4, EDHOC message_4) ----|
-        |                                             |
-        |========== encrypted RSMP Version ==========>|
 ```
 
-EDHOC message 4 is **REQUIRED**. Neither endpoint may create the application transport, send `data` or `rekey` frames, or process RSMP messages until message 4 has been successfully authenticated.
+EDHOC message 4 is **REQUIRED** for initial establishment. The responder completes its handshake when it has authenticated message 3 and successfully sent the complete message 4 frame. The initiator completes its handshake when it has received and successfully verified message 4. Each endpoint **MUST** reach its own completion event before creating the application transport, sending `data` or `rekey` frames, or processing RSMP messages.
+
+Each endpoint **MUST** enforce finite, positive, locally configurable timeouts for the initial handshake and for rekey (Section 9.3). The values may differ between exchanges and between peers. Each deadline **MUST** use a monotonic clock and cover the entire local exchange. Partial reads, completed frames, and progress on writes **MUST NOT** restart it. If the deadline expires before local completion, the endpoint **MUST** close the connection.
+
+The initial handshake timer starts when TCP connect succeeds at the initiator or TCP accept returns at the responder. It ends at that endpoint's message 4 completion event above, before the encrypted RSMP `Version` exchange.
 
 A receiver expects the message numbers in the sequence shown above. An unexpected number, frame type, profile, version, field, or EDHOC state transition is fatal.
 
+After EDHOC completes, the encrypted RSMP exchange in Section 5.3 proceeds by application role. In this successful exchange, A and B represent the two distinct RSMP message IDs.
+
+```text
+Site or follower                             Supervisor or leader
+      |-- Version request  (mId=A) ------------------>|
+      |<----------------------- MessageAck (oMId=A) --|
+      |<----------------- Version response (mId=B) ---|
+      |-- MessageAck (oMId=B) ----------------------->|
+```
+
 ### 6.1 Handshake errors
 
-If a failure follows receipt of a structurally valid `edhoc` or `edhoc_error` wrapper, the endpoint **MAY** send at most one `edhoc_error` frame containing an RFC 9528 EDHOC error message. It **MUST** use the generic unspecified error code and generic text `EDHOC handshake failed`, then close the connection.
+During initial establishment, an invalid frame or wrapper, an unexpected frame type or message number, or receipt of an `edhoc_error` **MUST** close the connection without a reply. A timeout while waiting for the next message also closes the connection without a reply.
 
-Malformed input that has not established a valid Secure RSMP handshake wrapper **MUST** be closed without a response. An endpoint receiving an `edhoc_error` **MUST NOT** answer it with another error. Diagnostic detail may be recorded locally but **MUST NOT** be exposed to the unauthenticated peer.
+Once the expected `edhoc` wrapper has passed validation, a failure to decode or process its embedded EDHOC message **MUST** produce one `edhoc_error` reply followed by connection closure, subject to the error-suppression provisions of RFC 9528 Section 6 (for example, denial-of-service protection). The wrapper's `edhoc` byte string contains the RFC 9528 CBOR Sequence of `ERR_CODE` followed by `ERR_INFO`. Senders **MUST** use the following values:
 
-The complete initial handshake **MUST** finish within two seconds. Timeout is fatal and closes the connection.
+| Failure | `ERR_CODE` | `ERR_INFO` |
+| --- | ---: | --- |
+| A well-formed message 1 selects an unsupported cipher suite (RFC 9528 Section 6.3) | 2 | Integer `4`, the only supported suite |
+| Message 2 or 3 references a KID for which the receiver has no credential (RFC 9528 Section 6.4) | 3 | CBOR simple value `true` |
+| Other failures, including a malformed embedded message, unsupported credential identifier type, or signature verification failure | 1 | Text string `EDHOC handshake failed` |
+
+Additional diagnostics stay local. An error reply terminates this exchange and **MUST NOT** trigger a retry with different parameters or a fallback to plaintext. Errors during encrypted rekey use the control defined in Section 9.3.
 
 ## 7. Exporter and key schedule
 
@@ -233,7 +272,7 @@ rsmp-context = {
 The deterministic-CBOR bytes are passed to RFC 9528:
 
 ```text
-EDHOC_Exporter(
+exporter_result = EDHOC_Exporter(
   label   = 32768,
   context = deterministic_cbor(rsmp-context),
   length  = 32
@@ -242,7 +281,7 @@ EDHOC_Exporter(
 
 Label 32768 is a private-use label. OSCORE exporter labels 0 and 1 **MUST NOT** be used.
 
-The 32-byte exporter result is expanded using full HKDF-SHA-256, with an empty salt. The exact deterministic-CBOR HKDF `info` values are:
+Both HKDF stages use the following `info` structures. The `rsmp_context` field is a CBOR byte string containing the same context bytes supplied to the exporter.
 
 ```cddl
 traffic-secret-info = {
@@ -258,18 +297,35 @@ labeled-info = {
 }
 ```
 
-The derived values are:
+Endpoints **MUST** apply full RFC 5869 HKDF-SHA-256 at each stage. In the equations below, `h''` is an empty byte string, lengths are in bytes, and `labeled-info(label)` is the map above with the indicated text string as its `label` value.
 
-| Value | Length |
-| --- | ---: |
-| traffic secret | 32 bytes |
-| session id | 16 bytes |
-| initiator-to-responder key | 32 bytes |
-| responder-to-initiator key | 32 bytes |
-| initiator-to-responder nonce prefix | 8 bytes |
-| responder-to-initiator nonce prefix | 8 bytes |
+```text
+HKDF(ikm, info, length) = HKDF-Expand(HKDF-Extract(h'', ikm), info, length)
 
-The session id is created by the initial exchange and remains constant across rekeys on that TCP connection. Every rekey uses a fresh EDHOC exporter result and derives fresh traffic secrets, directional keys, and nonce prefixes.
+traffic_secret = HKDF(exporter_result, deterministic_cbor(traffic-secret-info), 32)
+derive(label, length) = HKDF(traffic_secret, deterministic_cbor(labeled-info(label)), length)
+
+session_id       = derive("session id", 16)    # initial exchange only
+i2r_key          = derive("i2r key", 32)
+r2i_key          = derive("r2i key", 32)
+i2r_nonce_prefix = derive("i2r nonce", 8)
+r2i_nonce_prefix = derive("r2i nonce", 8)
+```
+
+`i2r` denotes the EDHOC initiator-to-responder direction and `r2i` the reverse. On every rekey, endpoints **MUST** derive a new traffic secret from the fresh EDHOC exporter result, derive both keys and both nonce prefixes from that secret, and retain the initial session ID.
+
+### 7.1 Key schedule test vector
+
+For the initial exchange, use credential subjects `RN+SI0001` (initiator) and `supervisor` (responder) and the fixed 32-byte exporter result `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`. The expected outputs are hexadecimal.
+
+| Output | Expected bytes |
+| --- | --- |
+| `traffic_secret` | `fba533cce9ad914357386290334a2f577a9848b91d2545c44c7b46f5fa06ba97` |
+| `session_id` | `a2053e954f583bd8bd340a2e67629ff5` |
+| `i2r_key` | `438e9532ddc32f0ed178b4630dbf2997a3acaa57be909117f845e11b3551ff4d` |
+| `r2i_key` | `641bb113a1fd043d7aa266d25a75f7dede88221cc5e5b90df119a2ed5d0bca37` |
+| `i2r_nonce_prefix` | `8bb798819d9ec4a8` |
+| `r2i_nonce_prefix` | `9df78ed6937d1eab` |
 
 ## 8. Protected RSMP data
 
@@ -317,9 +373,35 @@ The AEAD AAD is the RFC 9052 `Enc_structure`:
 
 This binds the ciphertext to the session, direction, epoch, index, and frame family. The outer map is parsed for dispatch, but its security-relevant values are independently authenticated through this AAD.
 
-The plaintext recovered from a `data` frame **MUST** decode as exactly one deterministic-CBOR map. After decoding, the map is dispatched as one RSMP message and is subject to the normal RSMP Core and SXL validation and error-handling rules. Unauthenticated plaintext **MUST NOT** reach the RSMP dispatcher.
+### 8.1 RSMP application payload
 
-A deterministic-CBOR decoding failure, COSE authentication failure, replay or ordering failure, authorization failure, or violation of Secure RSMP connection state **MUST** close the connection. After authorization has completed, an RSMP Core or SXL schema or semantic validation failure **MUST** be handled according to the applicable RSMP specification, including sending `MessageNotAck` where required. Sending or receiving an ordinary post-authorization `MessageNotAck` **MUST NOT** by itself close or rekey the secure channel. Failure of the protected initial `Version` exchange and an attempt to send a second `Version` remain connection-fatal as specified in Section 5.3.
+The plaintext **MUST** contain exactly one untagged CBOR map with no trailing bytes. At every nesting level, senders and receivers **MUST** apply the core deterministic encoding requirements, including definite lengths, the shortest permitted encodings, and bytewise lexicographic order of the encoded map keys. [RFC 8949 §4.2.1](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2.1)
+
+| JSON value | CBOR representation |
+| --- | --- |
+| Object | Map with unique UTF-8 text keys. Compare decoded names by Unicode scalar sequence, without normalization. Reject duplicates before constructing a map that could discard them. In JSON input, `"a"` and `"\u0061"` are the same name. |
+| Array | Array in the original element order. Apply these rules to every element. |
+| String | UTF-8 text with the same Unicode scalar sequence. This includes timestamps, base64 data, and legacy values such as `"1.0"`. |
+| Boolean or null | The corresponding CBOR `true`, `false`, or `null`. |
+| Number without a fraction or exponent | Exact CBOR integer (major type 0 or 1) from −2⁶⁴ through 2⁶⁴−1, inclusive. JSON `-0` encodes as integer zero. Reject integers outside this range. |
+| Number with a fraction or exponent | Convert to IEEE 754 binary64 using round-to-nearest, ties-to-even. Reject overflow and a nonzero input that rounds to zero. Encode the finite result in the shortest of binary16, binary32, or binary64 that preserves its value and its zero sign. |
+
+Only these CBOR representations are permitted. Byte strings, tags, non-text keys, undefined, other simple values, NaNs, and infinities are invalid anywhere in the payload. A sender **MUST** reject an unrepresentable outbound message before sending a frame or consuming a frame index.
+
+The receiver **MUST** preserve the integer or float form through RSMP validation. If it serializes a float back to JSON, it **MUST** include a fraction or exponent and enough digits to recover the same binary64 value, including the sign of zero. For example, `1.0` and `1e0` encode identically. Both remain distinct from integer `1`.
+
+These examples show the complete plaintext bytes for a one-member object:
+
+| JSON input | CBOR hex |
+| --- | --- |
+| `{"v":1}` | `a1 61 76 01` |
+| `{"v":1.0}` or `{"v":1e0}` | `a1 61 76 f9 3c 00` |
+| `{"v":-0.0}` | `a1 61 76 f9 80 00` |
+| `{"v":"1.0"}` | `a1 61 76 63 31 2e 30` |
+
+A receiver **MUST** close the connection if authenticated plaintext violates this mapping. Only an authenticated payload that satisfies the mapping may reach RSMP validation. A representable value in the wrong RSMP field type, such as a float in an integer-only field, is an RSMP validation failure. The receiver handles unknown application attributes according to the selected Core version and applicable SXL.
+
+A deterministic-CBOR decoding failure, COSE authentication failure, replay or ordering failure, authorization failure, or violation of Secure RSMP connection state **MUST** close the connection. After authorization has completed, an RSMP Core or SXL schema or semantic validation failure **MUST** be handled according to the applicable RSMP specification, including sending `MessageNotAck` where required. Sending or receiving an ordinary post-authorization `MessageNotAck` **MUST NOT** by itself close or rekey the secure channel. Failure of the initial `Version` exchange, a repeated request or response, or attempted renegotiation is connection-fatal as specified in Section 5.3.
 
 ## 9. Traffic-key epochs and renewal
 
@@ -335,9 +417,15 @@ An implementation **MUST** complete a rekey before any one of these per-directio
 | Ciphertext bytes, including AEAD tags | 68,719,476,736 bytes (64 GiB) |
 | Epoch lifetime | 7,200 seconds (2 hours) |
 
-Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. The message limit **MUST** be at least 3. The byte limit **MUST** reserve space for two maximum-sized old-epoch control frames. Rekey scheduling **MUST** reserve two old-epoch frame indices and sufficient bytes for the remaining control exchange. The rekey timeout is exactly two seconds, and time-based rekey starts sufficiently early to finish before the lifetime limit.
+Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. Each endpoint **MUST** reject a configuration that fails any of the following conditions:
 
-When any limit becomes due, application-data transmission stops until rekey succeeds. A failure, timeout, or inability to reserve safe nonce space is fatal.
+- The frame limit is at least 4 per direction. In a renewed epoch the responder needs room for the opening `rekey_ack`, one application frame, and two controls for the next renewal (`rekey_request` and `rekey_msg2`).
+- The ciphertext byte limit covers the largest `rekey_ack`, the largest application frame the endpoint will send, and two maximum-sized old-epoch controls it can send during renewal. Count only the ciphertext field including its AEAD tag for each frame. Use the endpoint's outbound sizes for this calculation. The initial handshake cap does not apply to these frames.
+- The epoch lifetime leaves time to send at least one application frame under the deployment's operating conditions as well as the full configured rekey timeout. A lifetime less than or equal to that timeout is invalid.
+
+Before sending an application frame, the sender **MUST** check its frame and ciphertext byte counts including the proposed frame and both reserved control frames. A frame that fits exactly may be sent. If either limit would be exceeded, the sender defers the application frame and starts or requests renewal. Both directions count every protected control and data frame against the epoch whose keys protect it. An endpoint **MUST** start or request time-based renewal while at least its full configured rekey timeout remains in the epoch.
+
+When renewal becomes due locally, the endpoint **MUST** pause application-data transmission. Section 9.3 defines which old-epoch data it can still receive and when it may resume sending. A failure, timeout, or inability to reserve the remaining control traffic within the epoch limits is fatal.
 
 ### 9.2 Roles and request
 
@@ -364,7 +452,7 @@ rekey-error = {
 }
 ```
 
-All controls are carried in `rekey` frames protected by `COSE_Encrypt0`. Except for `rekey_ack`, they use the current epoch and current traffic keys. `next_epoch` **MUST** equal `current_epoch + 1`.
+All controls are carried in `rekey` frames protected by `COSE_Encrypt0`. For a renewal starting in epoch `E`, every control carries `next_epoch = E + 1`. All controls except `rekey_ack` carry outer `epoch = E` and use epoch `E` keys. The acknowledgement carries outer `epoch = E + 1` and uses epoch `E + 1` keys.
 
 ### 9.3 Rekey exchange
 
@@ -383,13 +471,26 @@ Original initiator                            Original responder
 
 The embedded EDHOC exchange uses the same fixed profile and pinned credentials as the initial exchange, but fresh connection identifiers and ephemeral keys. EDHOC message 4 is not embedded in rekey. Instead, the responder's `rekey_ack`, authenticated as the first protected frame under the new epoch keys, confirms successful installation and possession of the new traffic keys.
 
-The responder authenticates EDHOC message 3, verifies that the credential subject is unchanged, derives and installs the new channel, then sends `rekey_ack` under the new keys. The initiator prepares a pending channel before sending message 3 but **MUST NOT** install it or resume application traffic until it authenticates the acknowledgement under the pending new keys.
+An endpoint starts its rekey timer when it starts or requests renewal, before waiting to write its first control. If the peer triggers renewal first, the timer starts when the endpoint authenticates the peer's first renewal control. A responder that sends `rekey_request` includes the wait for `rekey_msg1` in its deadline. Crossing triggers **MUST NOT** restart the timer. The responder completes renewal when it successfully sends the complete `rekey_ack` frame. The initiator completes renewal when it verifies that acknowledgement and installs the new epoch. Pending RSMP acknowledgement timers continue to run during renewal.
 
-The session id and authorization context remain unchanged. Frame indices reset independently to 1 in both directions. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
+TCP orders frames independently in each direction. An endpoint **MUST** pause new application sends when it starts or requests renewal, or when it receives the peer's first authenticated rekey control. Any old-epoch data already being written **MUST** precede the sender's first rekey control on the stream. The receiver uses the following controls to determine where old-epoch application data ends:
 
-Rekey **MUST** complete within two seconds. A party that can still authenticate a control failure **SHOULD** send exactly one `rekey_error` with code `failed`; both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
+| Sender | First control after its last old-epoch `data` frame |
+| --- | --- |
+| Initiator | `rekey_msg1` |
+| Responder | `rekey_request` if sent, otherwise `rekey_msg2` |
 
-Unsolicited responses, wrong roles, wrong epochs, application data during required or active rekey, an acknowledgement under old keys, changed peer identity, or malformed controls are fatal.
+Until it authenticates that control from the peer, the receiver **MUST** continue reading and processing valid old-epoch `data` in order, even while waiting for a rekey reply. Each frame remains subject to the usual authentication, index, authorization, and epoch limits. Processing it does not restart the rekey timeout. After the control, any further old-epoch `data` from that peer is connection-fatal. These rules also apply when `rekey_request` and `rekey_msg1` cross.
+
+During rekey, each endpoint **MUST** verify that the peer authenticated with the exact pinned credential used in the initial handshake and that the pin is still trusted when installing the new channel (Section 10). The responder authenticates EDHOC message 3, derives and installs the new channel, then sends `rekey_ack` under the new keys. The initiator prepares a pending channel before sending message 3 but **MUST NOT** install it or resume application traffic until it authenticates the acknowledgement under the pending new keys.
+
+The responder may resume application sends after sending `rekey_ack`. While sends are paused, each endpoint **MUST** defer outgoing RSMP messages, including any `MessageAck` or `MessageNotAck` owed for accepted frames, and continue processing rekey controls. On successful renewal it sends the deferred messages in order under the new keys. RSMP acknowledgements retain their original `oMId`.
+
+The session id and authorization context remain unchanged. The `rekey_ack` consumes responder-to-initiator index 1 in epoch `E + 1`, including one frame and its ciphertext bytes against that direction's new limits. The initiator **MUST** preserve that receive state when it installs the pending channel. The next responder frame uses index 2. The first initiator frame uses index 1. The previous channel's traffic secret, directional keys, and nonce prefixes **MUST** be erased after successful installation.
+
+On a control failure, a party that can still authenticate the error **SHOULD** send exactly one `rekey_error` with code `failed` if it can do so before the deadline. Both parties then close the connection. Detailed cryptographic errors **MUST NOT** be exposed on the wire.
+
+Unsolicited responses, wrong roles, wrong epochs, new-epoch data before `rekey_ack`, a `rekey_ack` under old keys, changed peer identity, or malformed controls are fatal.
 
 ## 10. Failure handling and operations
 
@@ -399,21 +500,49 @@ Long-term private keys, EDHOC session secrets, exporter results, traffic secrets
 
 Operational logs **SHOULD** record successful and failed authentication, authorization, rekey, credential selection, epoch changes, and reason categories. Logs **MUST NOT** contain private keys, traffic secrets, decrypted RSMP payloads unless explicitly required by policy, or peer-visible cryptographic diagnostics that create an oracle. Implementations **SHOULD** rate-limit repeated failed connection attempts.
 
-Credential provisioning, replacement, revocation, backup, and recovery are administrative responsibilities. Changes to pinned credentials or authorization policy apply to new connections; an active connection **SHOULD** be closed when its credential is revoked.
+Credential provisioning, replacement, revocation, backup, and recovery are administrative responsibilities. Each new connection **MUST** use the current local trust and authorization policy.
+
+Revocation takes effect at an endpoint when it applies a local trust update that removes or revokes the peer's pin. As part of that update, the endpoint **MUST** close every connection authenticated with that credential, including idle connections, and abort any pending handshake or rekey using it. From that point the endpoint **MUST NOT** send or dispatch further RSMP messages on those connections, including queued messages. A concurrent handshake or rekey **MUST NOT** install a channel using the revoked credential.
+
+A replacement credential requires a new TCP connection and initial EDHOC exchange, even when it has the same subject as the revoked credential.
 
 ## 11. Conformance requirements
 
 A conforming implementation **MUST** test at least:
 
-- exact deterministic-CBOR encoding and rejection of non-deterministic, duplicate, missing, and unknown fields;
-- exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
-- fixed EDHOC method 0 and suite 4, four-message initial completion, EAD rejection, fresh connection identifiers, and generic error behavior;
-- exporter context identity ordering and the complete HKDF derivation;
+- exact deterministic-CBOR encoding and rejection of non-deterministic encodings and duplicate, missing, or unknown fields in closed security maps;
+- initial handshake framing at the 65,536-byte boundary, including rejection of a declared length of 65,537 from the prefix alone;
+- after each role's initial handshake completion, application of local receive limits to protected frames, including during the `Version` exchange and rekey. Where local limits permit, a valid protected frame larger than 65,536 bytes must pass the size check;
+- exact CCS shape, derived KID, key lengths, duplicate subject, duplicate KID, and unknown peer rejection;
+- startup acceptance of a matching signing key and rejection of a mismatched key, including an inconsistent stored public key when the seed-plus-public-key file format is supported;
+- closure of all active and idle connections using a locally revoked pin, with no queued RSMP message sent or dispatched on them after the update;
+- revocation during initial EDHOC and during rekey while `rekey_ack` is pending, including rejection of a late completion using the revoked credential;
+- rejection of a new connection using the revoked pin and successful authentication on a new connection using an authorized replacement with the same subject;
+- message 1 beginning with `00 04` for initial establishment and rekey, rejection of singleton arrays in either field, EAD rejection, and fresh connection identifiers;
+- responder completion only after successfully sending message 4 and initiator completion only after verifying it, including a failed send and a failed verification;
+- enforcement of independently configured handshake and rekey deadlines, including handshake expiry with a silent peer or partial frames and rejection of disabled, non-finite, or non-positive timeouts;
+- silent closure on invalid wrappers and received errors, and the Section 6.1 error code and information for a wrong suite, an unknown KID, and a malformed embedded message, with no fallback;
+- exporter context identity ordering and all six outputs of the Section 7 key schedule test vector;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
-- continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
-- selected-Core validation of the complete initial `Version`; authorization of identity, role, and Core version; pre-authorization message restrictions; immutable authorization context; and later `Version` rejection;
+- byte-for-byte encoding and decoding of the Section 8.1 examples, both integer range endpoints, shortest float widths, signed zero, nested objects and arrays, and unchanged timestamp, base64, and legacy strings;
+- outbound rejection of out-of-range integers, floating-point overflow or underflow to zero, and duplicate JSON names after escape decoding, with no frame sent or index consumed;
+- connection closure on invalid authenticated payloads, including nested duplicate or non-text keys, tags, byte strings, non-finite floats, non-minimal encodings, and trailing items;
+- continued use of the same secure channel after a post-authorization RSMP field-type failure requiring `MessageNotAck`, including delivery of the next valid message;
+- one protected `Version` request and one response, each acknowledged by `oMId`, for both site-opened and supervisor-opened TCP connections and for follower/leader startup;
+- selected-Core validation of both `Version` messages, including the expected `step` in Core 3.3.0 and role-based identification in supported earlier versions without `step`;
+- outgoing rejection of a different locally pinned peer, listener selection by authenticated credential, and enforcement of the configured application role and permitted Core versions;
+- acceptance of a single matching site ID in a site or follower request, rejection of missing, mismatched, or multiple IDs, and rejection of a legacy response whose sole site ID differs from the original request;
+- authorization of the configured supervisor or leader when a valid Core 3.3.0 `supervisorId` differs from its policy identity, rejection of a missing required `supervisorId`, and authorization of a legacy responder from its pin when Core supplies no responder identity;
+- authorization of identity, role, and Core version at each endpoint, including that an acknowledgement alone cannot complete authorization and that other RSMP traffic is gated until local completion;
+- connection closure on a mismatched acknowledgement, a `MessageNotAck` for either `Version`, a repeated request or response, a wrong-role `Version`, or an attempt to change the authorization context;
 - initiator- and responder-triggered rekey, simultaneous triggers, fresh keys, stable session id, changed-identity rejection, new-key acknowledgement, old-key erasure, and all three mandatory limits;
-- rekey timeout, error control, invalid role, wrong epoch, unsolicited response, old-key acknowledgement, and data during rekey; and
+- consecutive responder-requested renewals at the four-frame minimum, with application data in both directions between renewals, both acknowledgement epoch fields equal to the target epoch, and subsequent responder and initiator indices 2 and 1 respectively;
+- acceptance at the exact byte budget, deferral when a proposed send exceeds the remaining budget by one byte, and configuration rejection when the frame, byte, or lifetime budget leaves insufficient room for application traffic and renewal;
+- delivery of in-flight old-epoch data before the peer's first rekey control for either trigger and for crossing triggers, including deferral of an owed RSMP acknowledgement until the new epoch;
+- rejection of old-epoch data after each direction's first rekey control and new-epoch data before `rekey_ack`, with ordering, epoch limits, and the rekey timeout enforced throughout;
+- rekey expiry while waiting to write, while a requesting responder waits for message 1, and while the initiator waits for the acknowledgement, including crossing triggers that leave the original deadline in force;
+- time-based renewal with the full configured timeout reserved, and continued operation of pending RSMP acknowledgement timers during renewal;
+- rekey error control, invalid role, wrong epoch, unsolicited response, and old-key acknowledgement; and
 - epoch values above 255, unsigned 64-bit exhaustion, and refusal to wrap.
 
 The normative CDDL artifact is `schemas/secure/rsmp-secure-v1.cddl`. CDDL establishes structure; implementations remain responsible for every semantic and cryptographic check stated in this document.
