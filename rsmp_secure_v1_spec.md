@@ -35,7 +35,7 @@ Secure RSMP v1 provides:
 
 ### 2.2 Trust boundary
 
-The protected path begins and ends at the processes that hold the long-term private keys and terminate EDHOC and COSE. An intermediary preserves end-to-end protection only if it forwards Secure RSMP frames unchanged. Any component that decrypts, translates, inspects plaintext, or re-encrypts traffic is a trusted endpoint and requires a separate Secure RSMP channel on each side.
+The protected path begins and ends at the processes that use the long-term signing keys and terminate EDHOC and COSE. An intermediary preserves end-to-end protection only if it forwards Secure RSMP frames unchanged. Any component that decrypts, translates, inspects plaintext, or re-encrypts traffic is a trusted endpoint and requires a separate Secure RSMP channel on each side.
 
 The profile assumes that peer credentials and authorization policy are provisioned through an authenticated administrative process. A pinned credential is a trust anchor; possession of a syntactically valid credential is not sufficient.
 
@@ -125,7 +125,7 @@ The `edhoc` byte string is the complete EDHOC message. The Secure RSMP wrapper i
 
 ### 5.1 Credential format
 
-Each endpoint has one Ed25519 private key and one exact, deterministic-CBOR CCS credential. The private-key file contains the 32-byte Ed25519 private seed followed by the corresponding 32-byte public key. It **MUST** be kept confidential and **MUST NOT** be carried on the wire or included in the credential.
+Each endpoint has one Ed25519 signing key and one deterministic-CBOR CCS credential. Private-key storage is implementation-defined. For example, an endpoint can use a file containing the 32-byte Ed25519 seed followed by the corresponding 32-byte public key, an operating-system keystore, or a non-exportable key in a secure element. The private key **MUST** be kept confidential and **MUST NOT** be carried in Secure RSMP messages or included in the credential.
 
 The `.cred` file is exactly:
 
@@ -160,7 +160,9 @@ The KID **MUST** equal the first 16 bytes of `SHA-256(raw_ed25519_public_key)`. 
 
 The credential **MUST** contain exactly these fields. It is neither self-signed nor wrapped in `COSE_Sign1`. Trust is established by pinning the complete `.cred` bytes through an authenticated provisioning process.
 
-At startup, an implementation **MUST** verify deterministic encoding, exact map shape, subject validity, key and KID lengths, derived KID correctness, correspondence between the local private and public key, and correspondence between the local public key and local credential. Duplicate trusted subjects or duplicate trusted KIDs **MUST** be rejected.
+At startup, an implementation **MUST** verify deterministic credential encoding, exact map shape, subject validity, public key and KID lengths, and derived KID correctness. Duplicate trusted subjects or duplicate trusted KIDs **MUST** be rejected.
+
+Before accepting or initiating Secure RSMP connections, the endpoint **MUST** verify at startup that its configured signing key matches the public key in its local credential. For example, it can sign a fresh local challenge and verify the signature with the credential's public key. If the endpoint uses the seed-plus-public-key file format described above, it **MUST** derive the public key from the seed and verify that it matches both the stored public key and the credential. If verification fails, the endpoint **MUST NOT** use that configuration.
 
 ### 5.2 EDHOC authentication
 
@@ -511,7 +513,8 @@ A conforming implementation **MUST** test at least:
 - exact deterministic-CBOR encoding and rejection of non-deterministic encodings and duplicate, missing, or unknown fields in closed security maps;
 - initial handshake framing at the 65,536-byte boundary, including rejection of a declared length of 65,537 from the prefix alone;
 - after each role's initial handshake completion, application of local receive limits to protected frames, including during the `Version` exchange and rekey. Where local limits permit, a valid protected frame larger than 65,536 bytes must pass the size check;
-- exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
+- exact CCS shape, derived KID, key lengths, duplicate subject, duplicate KID, and unknown peer rejection;
+- startup acceptance of a matching signing key and rejection of a mismatched key, including an inconsistent stored public key when the seed-plus-public-key file format is supported;
 - closure of all active and idle connections using a locally revoked pin, with no queued RSMP message sent or dispatched on them after the update;
 - revocation during initial EDHOC and during rekey while `rekey_ack` is pending, including rejection of a late completion using the revoked credential;
 - rejection of a new connection using the revoked pin and successful authentication on a new connection using an authorized replacement with the same subject;

@@ -18,12 +18,16 @@ messages cannot simply be read, modified, injected, reordered, or replayed.
 
 ## The short version
 
-Each endpoint has two long-term files:
+Each endpoint has a long-term Ed25519 signing key and a public credential.
 
-- A **private key** is its secret proof of identity. It stays on the endpoint
-  that owns it.
+- The endpoint uses its **private key** to sign during the handshake. It can
+  load the key from a file or ask a keystore or secure element to sign.
 - A **credential** contains the endpoint's name, public key, and key identifier.
   Copies are installed on peers that are allowed to trust that endpoint.
+
+At startup, the endpoint checks that its signing key matches the public key in
+its own credential. A secure element can sign a fresh local challenge so the
+endpoint can verify the signature without exporting the private key.
 
 When a connection starts, EDHOC performs a mutually authenticated handshake.
 The endpoints use their long-term identity keys to authenticate the handshake
