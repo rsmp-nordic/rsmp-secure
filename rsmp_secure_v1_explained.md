@@ -205,10 +205,13 @@ sequenceDiagram
     Listener-->>Connector: EDHOC message 4<br/>authenticated completion
 ```
 
-All four initial EDHOC messages are required. No RSMP application message is
-accepted before message 4 has been authenticated. A failure or a two-second
-timeout closes the connection, and Secure RSMP never falls back to plaintext on
-that connection.
+All four initial EDHOC messages are required. Once the listener has verified
+message 3 and successfully sent message 4, it can start the encrypted RSMP
+exchange in its application role. The connector can do so once it has verified
+message 4. A handshake failure or a two-second timeout closes the connection.
+For example, a listener that receives a well-formed message 1 selecting an
+unsupported suite reports suite 4 in an EDHOC error and closes. The connector
+also closes on receipt of the error.
 
 ### Authentication is not authorization
 

@@ -65,7 +65,7 @@ An implementation claiming conformance to `rsmp-secure-v1` **MUST** use exactly 
 
 The profile name is the exact UTF-8 string `rsmp-secure-v1`, and the Secure RSMP wire version is the integer `1`.
 
-The offered EDHOC method list **MUST** be `[0]`, and the offered cipher-suite list **MUST** be `[4]`. Implementations **MUST NOT** negotiate, accept, or fall back to another method, cipher suite, profile, or plaintext RSMP on the same connection.
+In EDHOC message 1, `METHOD` **MUST** be the CBOR integer `0` and `SUITES_I` **MUST** be the CBOR integer `4`. These are the first two items of the RFC 9528 CBOR Sequence, so the embedded EDHOC bytes begin with hex `00 04`. A receiver **MUST** reject an array in either position. This encoding applies to both initial establishment and rekey. Implementations **MUST NOT** negotiate, accept, or fall back to another method, cipher suite, profile, or plaintext RSMP on the same connection.
 
 Secure RSMP v1 **MUST NOT** send or accept EDHOC External Authorization Data (EAD), whether critical or non-critical. Algorithm agility, alternate credentials, or post-quantum mechanisms require a separately named future profile with independent conformance rules. Such a profile **MUST NOT** introduce downgrade negotiation into `rsmp-secure-v1`.
 
@@ -213,7 +213,7 @@ TCP/EDHOC initiator                         TCP/EDHOC responder
         |<--------- edhoc(msg=4, EDHOC message_4) ----|
 ```
 
-EDHOC message 4 is **REQUIRED**. Neither endpoint may create the application transport, send `data` or `rekey` frames, or process RSMP messages until message 4 has been successfully authenticated.
+EDHOC message 4 is **REQUIRED** for initial establishment. The responder completes its handshake when it has authenticated message 3 and successfully sent the complete message 4 frame. The initiator completes its handshake when it has received and successfully verified message 4. Each endpoint **MUST** reach its own completion event before creating the application transport, sending `data` or `rekey` frames, or processing RSMP messages.
 
 A receiver expects the message numbers in the sequence shown above. An unexpected number, frame type, profile, version, field, or EDHOC state transition is fatal.
 
@@ -229,9 +229,17 @@ Site or follower                             Supervisor or leader
 
 ### 6.1 Handshake errors
 
-If a failure follows receipt of a structurally valid `edhoc` or `edhoc_error` wrapper, the endpoint **MAY** send at most one `edhoc_error` frame containing an RFC 9528 EDHOC error message. It **MUST** use the generic unspecified error code and generic text `EDHOC handshake failed`, then close the connection.
+During initial establishment, an invalid frame or wrapper, an unexpected frame type or message number, or receipt of an `edhoc_error` **MUST** close the connection without a reply. A timeout while waiting for the next message also closes the connection without a reply.
 
-Malformed input that has not established a valid Secure RSMP handshake wrapper **MUST** be closed without a response. An endpoint receiving an `edhoc_error` **MUST NOT** answer it with another error. Diagnostic detail may be recorded locally but **MUST NOT** be exposed to the unauthenticated peer.
+Once the expected `edhoc` wrapper has passed validation, a failure to decode or process its embedded EDHOC message **MUST** produce one `edhoc_error` reply followed by connection closure, subject to the error-suppression provisions of RFC 9528 Section 6 (for example, denial-of-service protection). The wrapper's `edhoc` byte string contains the RFC 9528 CBOR Sequence of `ERR_CODE` followed by `ERR_INFO`. Senders **MUST** use the following values:
+
+| Failure | `ERR_CODE` | `ERR_INFO` |
+| --- | ---: | --- |
+| A well-formed message 1 selects an unsupported cipher suite (RFC 9528 Section 6.3) | 2 | Integer `4`, the only supported suite |
+| Message 2 or 3 references a KID for which the receiver has no credential (RFC 9528 Section 6.4) | 3 | CBOR simple value `true` |
+| Other failures, including a malformed embedded message, unsupported credential identifier type, or signature verification failure | 1 | Text string `EDHOC handshake failed` |
+
+Additional diagnostics stay local. An error reply terminates this exchange and **MUST NOT** trigger a retry with different parameters or a fallback to plaintext. Errors during encrypted rekey use the control defined in Section 9.3.
 
 The complete initial handshake **MUST** finish within two seconds. Timeout is fatal and closes the connection.
 
@@ -464,7 +472,9 @@ A conforming implementation **MUST** test at least:
 
 - exact deterministic-CBOR encoding and rejection of non-deterministic, duplicate, missing, and unknown fields;
 - exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
-- fixed EDHOC method 0 and suite 4, four-message initial completion, EAD rejection, fresh connection identifiers, and generic error behavior;
+- message 1 beginning with `00 04` for initial establishment and rekey, rejection of singleton arrays in either field, EAD rejection, and fresh connection identifiers;
+- responder completion only after successfully sending message 4 and initiator completion only after verifying it, including a failed send and a failed verification;
+- silent closure on invalid wrappers and received errors, and the Section 6.1 error code and information for a wrong suite, an unknown KID, and a malformed embedded message, with no fallback;
 - exporter context identity ordering and all six outputs of the Section 7 key schedule test vector;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
 - continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
