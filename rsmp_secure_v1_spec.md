@@ -76,9 +76,13 @@ Every Secure RSMP frame is encoded as:
 1. a four-byte unsigned big-endian length; followed by
 2. exactly that many bytes of deterministic CBOR.
 
-The length counts the CBOR bytes only. A frame **MUST NOT** exceed 65,536 CBOR bytes. A receiver **MUST** reject an oversized, truncated, non-deterministic, or malformed frame and close the connection.
+The length counts the CBOR bytes only. During the initial EDHOC handshake, a frame **MUST NOT** exceed 65,536 CBOR bytes (64 KiB), including the wrapper. This limit applies through message 4 and to initial handshake errors. It ends at the endpoint's local handshake completion event in Section 6.
 
-All maps defined by this specification are closed maps: a conforming sender **MUST** include every specified field exactly once and **MUST NOT** include unknown fields. A receiver **MUST** reject missing, duplicate, or unknown fields, wrong CBOR types, non-minimal integer encodings, and non-deterministic map ordering.
+After initial EDHOC completion, the four-byte prefix can represent up to 4,294,967,295 CBOR bytes. The profile imposes no additional frame-size cap. This rule applies from the first protected `Version` message and throughout rekey. An endpoint **MAY** enforce local send and receive limits according to its available resources.
+
+The receiver **MUST** check the declared length against the applicable limit before allocating a buffer for the declared size or reading the frame body. An oversized, truncated, non-deterministic, or malformed frame **MUST** close the connection.
+
+The maps defining the security envelope, credentials, key derivation inputs, authenticated data, and rekey controls are closed. A sender **MUST** include exactly the specified fields, each once. A receiver **MUST** reject missing, duplicate, or unknown fields, wrong CBOR types, non-minimal integer encodings, and non-deterministic map ordering. Section 8.1 defines the application payload. The selected RSMP Core version and SXL determine how to handle its attributes.
 
 The following CDDL is an overview of the outer frame family:
 
@@ -365,7 +369,33 @@ The AEAD AAD is the RFC 9052 `Enc_structure`:
 
 This binds the ciphertext to the session, direction, epoch, index, and frame family. The outer map is parsed for dispatch, but its security-relevant values are independently authenticated through this AAD.
 
-The plaintext recovered from a `data` frame **MUST** decode as exactly one deterministic-CBOR map. After decoding, the map is dispatched as one RSMP message and is subject to the normal RSMP Core and SXL validation and error-handling rules. Unauthenticated plaintext **MUST NOT** reach the RSMP dispatcher.
+### 8.1 RSMP application payload
+
+The plaintext **MUST** contain exactly one untagged CBOR map with no trailing bytes. At every nesting level, senders and receivers **MUST** apply the core deterministic encoding requirements, including definite lengths, the shortest permitted encodings, and bytewise lexicographic order of the encoded map keys. [RFC 8949 §4.2.1](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2.1)
+
+| JSON value | CBOR representation |
+| --- | --- |
+| Object | Map with unique UTF-8 text keys. Compare decoded names by Unicode scalar sequence, without normalization. Reject duplicates before constructing a map that could discard them. In JSON input, `"a"` and `"\u0061"` are the same name. |
+| Array | Array in the original element order. Apply these rules to every element. |
+| String | UTF-8 text with the same Unicode scalar sequence. This includes timestamps, base64 data, and legacy values such as `"1.0"`. |
+| Boolean or null | The corresponding CBOR `true`, `false`, or `null`. |
+| Number without a fraction or exponent | Exact CBOR integer (major type 0 or 1) from −2⁶⁴ through 2⁶⁴−1, inclusive. JSON `-0` encodes as integer zero. Reject integers outside this range. |
+| Number with a fraction or exponent | Convert to IEEE 754 binary64 using round-to-nearest, ties-to-even. Reject overflow and a nonzero input that rounds to zero. Encode the finite result in the shortest of binary16, binary32, or binary64 that preserves its value and its zero sign. |
+
+Only these CBOR representations are permitted. Byte strings, tags, non-text keys, undefined, other simple values, NaNs, and infinities are invalid anywhere in the payload. A sender **MUST** reject an unrepresentable outbound message before sending a frame or consuming a frame index.
+
+The receiver **MUST** preserve the integer or float form through RSMP validation. If it serializes a float back to JSON, it **MUST** include a fraction or exponent and enough digits to recover the same binary64 value, including the sign of zero. For example, `1.0` and `1e0` encode identically. Both remain distinct from integer `1`.
+
+These examples show the complete plaintext bytes for a one-member object:
+
+| JSON input | CBOR hex |
+| --- | --- |
+| `{"v":1}` | `a1 61 76 01` |
+| `{"v":1.0}` or `{"v":1e0}` | `a1 61 76 f9 3c 00` |
+| `{"v":-0.0}` | `a1 61 76 f9 80 00` |
+| `{"v":"1.0"}` | `a1 61 76 63 31 2e 30` |
+
+A receiver **MUST** close the connection if authenticated plaintext violates this mapping. Only an authenticated payload that satisfies the mapping may reach RSMP validation. A representable value in the wrong RSMP field type, such as a float in an integer-only field, is an RSMP validation failure. The receiver handles unknown application attributes according to the selected Core version and applicable SXL.
 
 A deterministic-CBOR decoding failure, COSE authentication failure, replay or ordering failure, authorization failure, or violation of Secure RSMP connection state **MUST** close the connection. After authorization has completed, an RSMP Core or SXL schema or semantic validation failure **MUST** be handled according to the applicable RSMP specification, including sending `MessageNotAck` where required. Sending or receiving an ordinary post-authorization `MessageNotAck` **MUST NOT** by itself close or rekey the secure channel. Failure of the initial `Version` exchange, a repeated request or response, or attempted renegotiation is connection-fatal as specified in Section 5.3.
 
@@ -386,7 +416,7 @@ An implementation **MUST** complete a rekey before any one of these per-directio
 Deployments **MAY** configure lower limits but **MUST NOT** disable a limit or configure a higher one. Each endpoint **MUST** reject a configuration that fails any of the following conditions:
 
 - The frame limit is at least 4 per direction. In a renewed epoch the responder needs room for the opening `rekey_ack`, one application frame, and two controls for the next renewal (`rekey_request` and `rekey_msg2`).
-- The ciphertext byte limit covers the largest `rekey_ack`, one maximum-sized application frame, and the reserve for two maximum-sized old-epoch control frames. Count the ciphertext field including its AEAD tag for each frame. For example, 196,660 bytes suffices using 65,536 bytes as a conservative bound for each of the three non-ack frames and 52 ciphertext bytes for the largest `rekey_ack`.
+- The ciphertext byte limit covers the largest `rekey_ack`, the largest application frame the endpoint will send, and two maximum-sized old-epoch controls it can send during renewal. Count only the ciphertext field including its AEAD tag for each frame. Use the endpoint's outbound sizes for this calculation. The initial handshake cap does not apply to these frames.
 - The epoch lifetime leaves time to send at least one application frame under the deployment's operating conditions before reserving the full two-second rekey timeout. A lifetime of two seconds or less is invalid.
 
 Before sending an application frame, the sender **MUST** check its frame and ciphertext byte counts including the proposed frame and both reserved control frames. A frame that fits exactly may be sent. If either limit would be exceeded, the sender defers the application frame and starts or requests renewal. Both directions count every protected control and data frame against the epoch whose keys protect it. Time-based renewal **MUST** start early enough to finish within the epoch lifetime.
@@ -470,14 +500,19 @@ Credential provisioning, replacement, revocation, backup, and recovery are admin
 
 A conforming implementation **MUST** test at least:
 
-- exact deterministic-CBOR encoding and rejection of non-deterministic, duplicate, missing, and unknown fields;
+- exact deterministic-CBOR encoding and rejection of non-deterministic encodings and duplicate, missing, or unknown fields in closed security maps;
+- initial handshake framing at the 65,536-byte boundary, including rejection of a declared length of 65,537 from the prefix alone;
+- after each role's initial handshake completion, application of local receive limits to protected frames, including during the `Version` exchange and rekey. Where local limits permit, a valid protected frame larger than 65,536 bytes must pass the size check;
 - exact CCS shape, derived KID, key lengths, private/public match, duplicate subject, duplicate KID, and unknown peer rejection;
 - message 1 beginning with `00 04` for initial establishment and rekey, rejection of singleton arrays in either field, EAD rejection, and fresh connection identifiers;
 - responder completion only after successfully sending message 4 and initiator completion only after verifying it, including a failed send and a failed verification;
 - silent closure on invalid wrappers and received errors, and the Section 6.1 error code and information for a wrong suite, an unknown KID, and a malformed embedded message, with no fallback;
 - exporter context identity ordering and all six outputs of the Section 7 key schedule test vector;
 - known-answer encryption/decryption, directional key separation, nonce construction, AAD binding, tag failure, replay, gaps, reordering, and index exhaustion;
-- continued use of the same secure channel after an ordinary post-authorization `MessageNotAck`;
+- byte-for-byte encoding and decoding of the Section 8.1 examples, both integer range endpoints, shortest float widths, signed zero, nested objects and arrays, and unchanged timestamp, base64, and legacy strings;
+- outbound rejection of out-of-range integers, floating-point overflow or underflow to zero, and duplicate JSON names after escape decoding, with no frame sent or index consumed;
+- connection closure on invalid authenticated payloads, including nested duplicate or non-text keys, tags, byte strings, non-finite floats, non-minimal encodings, and trailing items;
+- continued use of the same secure channel after a post-authorization RSMP field-type failure requiring `MessageNotAck`, including delivery of the next valid message;
 - one protected `Version` request and one response, each acknowledged by `oMId`, for both site-opened and supervisor-opened TCP connections and for follower/leader startup;
 - selected-Core validation of both `Version` messages, including the expected `step` in Core 3.3.0 and role-based identification in supported earlier versions without `step`;
 - outgoing rejection of a different locally pinned peer, listener selection by authenticated credential, and enforcement of the configured application role and permitted Core versions;

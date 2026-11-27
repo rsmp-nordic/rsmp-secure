@@ -313,14 +313,18 @@ flowchart LR
     frame --> network[Network]
 ```
 
-CBOR is a compact, unambiguous representation of the message; it is not itself
-encryption. COSE provides the standard protected container. ChaCha20/Poly1305
-is an authenticated-encryption algorithm, which produces both ciphertext and
-an authentication tag.
+CBOR preserves the types that Core and the SXL need to validate. For example,
+`1` travels as an integer, `1.0` as a float, and `"1.0"` as text. Timestamps
+and base64 values also stay text. Object keys have a defined order on the
+wire, while array elements keep their original order. COSE carries the
+encrypted CBOR and its ChaCha20/Poly1305 authentication tag.
 
-On receipt, the peer first checks the expected frame index and authentication
-tag. Only if those checks succeed does it decrypt and pass the recovered RSMP
-message to normal RSMP validation and dispatch.
+The receiver checks the frame index, authenticates the contents, and checks
+the payload encoding before handing the message to RSMP. A duplicate object
+key anywhere in the payload closes the connection. A well-encoded message
+with the wrong type for an RSMP field reaches Core or SXL validation. After
+authorization, the peer sends `MessageNotAck` where required and can continue
+processing messages on the same connection.
 
 The authentication tag covers not only the encrypted message but also security
 context including:
